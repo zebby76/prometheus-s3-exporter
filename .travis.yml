@@ -63,4 +63,4 @@ env:
     - VCS_REF=${TRAVIS_COMMIT}
     - BUILD_DATE=`date -u +"%Y-%m-%dT%H:%M:%SZ"`
     - DOCKER_TAG="${VERSION}-${RELEASE_NUMBER}"
-    - DOCKER_IMAGE_NAME="docker.io/$DOCKER_USERNAME/prometheus-s3-exporter"
+    - DOCKER_IMAGE_NAME="docker.io/smalswebtech/prometheus-s3-exporter"

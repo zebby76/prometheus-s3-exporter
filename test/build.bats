@@ -15,7 +15,7 @@ export BATS_CLAIR_LOCAL_SCANNER_CONFIG_VOLUME_NAME=${BATS_CLAIR_LOCAL_SCANNER_CO
 
 export BATS_DOCKER_IMAGE_NAME="${DOCKER_IMAGE_NAME:-docker.io/zebby76/prometheus-s3-exporter}:rc"
 
-docker-compose -f docker-compose.yml build --compress --pull --no-cache exporter >&2
+docker-compose -f docker-compose.yml build --compress --pull --no-cache exporter
 
 @test "[$TEST_FILE] Check Docker images build" {
   run docker inspect --type=image ${BATS_DOCKER_IMAGE_NAME}

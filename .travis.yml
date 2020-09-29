@@ -46,6 +46,12 @@ after_success:
   - test $TRAVIS_BRANCH = "master" && test $TRAVIS_PULL_REQUEST = "false" && docker push ${DOCKER_IMAGE_NAME}:${VCS_REF}
   - test $TRAVIS_BRANCH = "master" && test $TRAVIS_PULL_REQUEST = "false" && docker push ${DOCKER_IMAGE_NAME}:latest
 
+addons:
+  apt:
+    packages:
+      - docker-ce
+      - pass
+
 notifications:
   email: false
 

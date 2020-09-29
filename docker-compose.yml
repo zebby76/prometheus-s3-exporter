@@ -1,0 +1,86 @@
+version: "2.2"
+
+services:
+  s3:
+    image: docker.io/localstack/localstack:0.8.8
+    container_name: s3
+    ports:
+      - 4572:4572
+    environment:
+      - SERVICES=s3
+      - DEBUG=true
+      - DATA_DIR=/tmp/localstack/data
+      - PORT_WEB_UI=8080
+    networks:
+      - default
+    mem_limit: 512m
+
+  clair_db:
+    image: arminc/clair-db:latest
+    container_name: clair_db
+    networks:
+      - default
+    mem_limit: 512m
+
+  clair_local_scan:
+    image: arminc/clair-local-scan:latest
+    container_name: clair_local_scan
+    links:
+      - clair_db:postgres
+    depends_on:
+      - clair_db
+    networks:
+      - default
+    mem_limit: 512m
+
+  clair_local_scanner:
+    image: zebby76/clair-scanner:latest
+    container_name: clair_local_scanner
+    command: ["--clair","${BATS_CLAIR_LOCAL_ENDPOINT_URL}","--ip","${BATS_CLAIR_LOCAL_SCANNER_IP}","--all","-l","/opt/clair/config/clair-report.log","-r","/opt/clair/config/clair-report.json","-w","/opt/clair/config/clair-whitelist.yml","${BATS_CLAIR_SCAN_DOCKER_IMAGE_NAME}"]
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - clair_config:/opt/clair/config
+    links:
+      - clair_db:postgres
+    depends_on:
+      - clair_db
+    networks:
+      - default
+    mem_limit: 512m
+
+  exporter:
+    image: ${BATS_DOCKER_IMAGE_NAME}
+    container_name: exporter
+    environment:
+      - OPENSHIFT_NODE_HOSTNAME=node1.openshift.cloud.vm
+      - OPENSHIFT_NAMESPACE=default-namespace
+      - AWS_ACCESS_KEY_ID=${BATS_S3_ACCESS_KEY_ID}
+      - AWS_SECRET_ACCESS_KEY=${BATS_S3_SECRET_ACCESS_KEY}
+      - AWS_DEFAULT_REGION=${BATS_S3_DEFAULT_REGION}
+      - AWS_ENDPOINT_URL=${BATS_S3_ENDPOINT_URL}
+      - S3_BUCKET_NAME=${BATS_S3_BUCKET_NAME}
+    ports:
+      - 9773:9773
+      - 9774:9774
+    networks:
+      - default
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        VERSION_ARG: ${DOCKER_IMAGE_VERSION}
+        BUILD_DATE_ARG: ${BUILD_DATE}
+        RELEASE_ARG: ${RELEASE_NUMBER}
+        VCS_REF_ARG: ${VCS_REF}
+        AWS_CLI_VERSION_ARG: ${AWS_CLI_VERSION}
+    mem_limit: 128m
+
+volumes:
+  clair_config:
+    external:
+      name: ${BATS_CLAIR_LOCAL_SCANNER_CONFIG_VOLUME_NAME}
+
+networks:
+  default:
+    external:
+      name: docker_default

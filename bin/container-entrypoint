@@ -1,0 +1,16 @@
+#!/bin/bash
+
+function configure {
+
+  echo "  Prometheus S3 Exporter configuration ..."
+  export AWS_CLI_EXTRA_ARGS="--cli-read-timeout 5 --cli-connect-timeout 5"
+
+}
+
+echo "Configure Prometheus S3 Exporter Container ..."
+configure
+echo "Prometheus S3 Exporter Container configured succesfully ..."
+
+set -eu
+cmd="$1"; shift
+exec $cmd "$@"

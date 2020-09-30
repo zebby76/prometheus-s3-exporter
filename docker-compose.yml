@@ -61,7 +61,6 @@ services:
       - S3_BUCKET_NAME=${BATS_S3_BUCKET_NAME}
     ports:
       - 9773:9773
-      - 9774:9774
     networks:
       - default
     build:

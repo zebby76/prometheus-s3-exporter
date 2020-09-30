@@ -58,17 +58,17 @@ export BATS_DOCKER_IMAGE_NAME="${DOCKER_IMAGE_NAME:-docker.io/zebby76/prometheus
 
 
 @test "[$TEST_FILE] Test 'WebTech S3 Exporter (Prometheus Exporter)' /metrics" {
-  retry 12 5 curl_container exporter :9774/metrics -s -w %{http_code} -o /dev/null
+  retry 12 5 curl_container exporter :9773/metrics -s -w %{http_code} -o /dev/null
   assert_output -l 0 $'200'
-  retry 12 5 curl_container exporter :9774/metrics -s
+  retry 12 5 curl_container exporter :9773/metrics -s
   assert_output -l "webtech_s3_bucket_count_total{name=\"${BATS_S3_BUCKET_NAME}\"} webtech_s3_bucket_count_total 5"
 }
 
-@test "[$TEST_FILE] Stop all and delete test containers" {
-  command docker-compose -f docker-compose.yml stop
-  command docker-compose -f docker-compose.yml rm -v -f  
-}
-
-@test "[$TEST_FILE] Cleanup Docker external volumes (local)" {
-  command docker volume rm ${BATS_CLAIR_LOCAL_SCANNER_CONFIG_VOLUME_NAME}
-}
+#@test "[$TEST_FILE] Stop all and delete test containers" {
+#  command docker-compose -f docker-compose.yml stop
+#  command docker-compose -f docker-compose.yml rm -v -f  
+#}
+#
+#@test "[$TEST_FILE] Cleanup Docker external volumes (local)" {
+#  command docker volume rm ${BATS_CLAIR_LOCAL_SCANNER_CONFIG_VOLUME_NAME}
+#}

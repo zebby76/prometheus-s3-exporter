@@ -3,7 +3,7 @@
 # BEGIN CONFIG
 # edit below
 # number of workers (subprocesses) to use
-workers=2
+workers=1
 
 # enables "modules"
 #          size - Total size of S3 Bucket

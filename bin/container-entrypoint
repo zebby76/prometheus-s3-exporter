@@ -3,7 +3,7 @@
 function configure {
 
   echo "  Prometheus S3 Exporter configuration ..."
-  export AWS_CLI_EXTRA_ARGS="--cli-read-timeout 5 --cli-connect-timeout 5"
+  export AWS_CLI_EXTRA_ARGS="${AWS_CLI_EXTRA_ARGS} --cli-read-timeout 10 --cli-connect-timeout 5"
 
 }
 

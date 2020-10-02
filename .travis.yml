@@ -58,7 +58,7 @@ notifications:
 env:
   global:
     - DOCKER_COMPOSE_VERSION=1.25.4
-    - VERSION=0.0.2
+    - VERSION=1.0.0
     - RELEASE_NUMBER=$TRAVIS_BUILD_NUMBER
     - VCS_REF=${TRAVIS_COMMIT}
     - BUILD_DATE=`date -u +"%Y-%m-%dT%H:%M:%SZ"`

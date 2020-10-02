@@ -61,7 +61,7 @@ export BATS_DOCKER_IMAGE_NAME="${DOCKER_IMAGE_NAME:-docker.io/zebby76/prometheus
   retry 12 5 curl_container exporter :9773/metrics -s -w %{http_code} -o /dev/null
   assert_output -l 0 $'200'
   retry 12 5 curl_container exporter :9773/metrics -s
-  assert_output -l "webtech_s3_bucket_count_total{name=\"${BATS_S3_BUCKET_NAME}\"} webtech_s3_bucket_count_total 5"
+  assert_output -l "webtech_s3_bucket_count_total{name=\"${BATS_S3_BUCKET_NAME}\"} webtech_s3_bucket_count_total 5.0"
 }
 
 @test "[$TEST_FILE] Stop all and delete test containers" {

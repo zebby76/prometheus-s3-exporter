@@ -117,7 +117,7 @@ function metrics_count {
     count=$(aws s3 ls --recursive ${S3_BUCKET_NAME} ${AWS_CLI_EXTRA_ARGS} | wc -l)
 
     buildMetric "bucket_count_total" "counter" "From bucket S3"
-    addMetricContent "bucket_count_total" "{name=\"${S3_BUCKET_NAME}\"}" "${count}.0"
+    addMetricContent "bucket_count_total" "{name=\"${S3_BUCKET_NAME}\"}" "${count}.000"
 
     buildOutput
 }

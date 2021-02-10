@@ -42,7 +42,7 @@ RUN mkdir -p /opt/bin /opt/src /opt/etc \
     && chmod -R ug+rw /opt \
     && find /opt -type d -exec chmod ug+x {} \; \
     && echo "Install Alpine packages ..." \
-    && apk add --update --virtual .exporter-rundeps findutils binutils coreutils bash tzdata supervisor curl ca-certificates openssl libressl python3 nginx fcgiwrap spawn-fcgi \
+    && apk add --no-cache --update --virtual .exporter-rundeps findutils binutils coreutils bash tzdata supervisor curl ca-certificates openssl libressl python3 nginx fcgiwrap spawn-fcgi \
     && touch /var/log/supervisord.log \
     && touch /var/run/supervisord.pid \
     && mkdir -p /etc/nginx/sites-enabled /var/log/nginx /var/cache/nginx \

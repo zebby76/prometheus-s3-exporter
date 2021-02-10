@@ -128,14 +128,14 @@ function metrics_count {
 #
 
 if [ "$1" = "get" ]; then 
-    metrics_$3 "/tmp/$2/bucket.list" > "/tmp/$2/$3"
+    metrics_$3 "/tmp/$2/.bucket.list" > "/tmp/$2/$3"
 else
     run=$(join_by , ${exporters[*]})
 
     # make temp dir
     mkdir -p /tmp/$$/
 
-    list_bucket "/tmp/$$/bucket.list"
+    list_bucket "/tmp/$$/.bucket.list"
 
     # we're using xargs to run this script in multiple subprocesses
     # xargs will handle collecting data for us

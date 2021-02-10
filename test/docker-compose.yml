@@ -15,41 +15,8 @@ services:
       - default
     mem_limit: 512m
 
-  clair_db:
-    image: arminc/clair-db:latest
-    container_name: clair_db
-    networks:
-      - default
-    mem_limit: 512m
-
-  clair_local_scan:
-    image: arminc/clair-local-scan:latest
-    container_name: clair_local_scan
-    links:
-      - clair_db:postgres
-    depends_on:
-      - clair_db
-    networks:
-      - default
-    mem_limit: 512m
-
-  clair_local_scanner:
-    image: zebby76/clair-scanner:latest
-    container_name: clair_local_scanner
-    command: ["--clair","${BATS_CLAIR_LOCAL_ENDPOINT_URL}","--ip","${BATS_CLAIR_LOCAL_SCANNER_IP}","--all","-l","/opt/clair/config/clair-report.log","-r","/opt/clair/config/clair-report.json","-w","/opt/clair/config/clair-whitelist.yml","${BATS_CLAIR_SCAN_DOCKER_IMAGE_NAME}"]
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
-      - clair_config:/opt/clair/config
-    links:
-      - clair_db:postgres
-    depends_on:
-      - clair_db
-    networks:
-      - default
-    mem_limit: 512m
-
   exporter:
-    image: ${BATS_DOCKER_IMAGE_NAME}
+    image: ${BATS_EXPORTER_DOCKER_IMAGE_NAME}
     container_name: exporter
     environment:
       - OPENSHIFT_NODE_HOSTNAME=node1.openshift.cloud.vm
@@ -72,11 +39,6 @@ services:
         VCS_REF_ARG: ${VCS_REF}
         AWS_CLI_VERSION_ARG: ${AWS_CLI_VERSION}
     mem_limit: 128m
-
-volumes:
-  clair_config:
-    external:
-      name: ${BATS_CLAIR_LOCAL_SCANNER_CONFIG_VOLUME_NAME}
 
 networks:
   default:

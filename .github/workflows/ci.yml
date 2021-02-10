@@ -1,0 +1,189 @@
+name: Continuous Docker Image Build
+
+on:
+  push:
+    branches:
+      - '**'
+
+  pull_request:
+
+jobs:
+
+  build-docker-images:
+
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v2
+
+      - name: Fill GitHub Environment Variables
+        uses: FranzDiebold/github-env-vars-action@v2.1.0
+
+      - name: Setup BATS testing framework
+        uses: mig4/setup-bats@v1.2.0
+        with:
+          bats-version: 1.2.1
+
+      - name: Fill PHP Version Environment Variable
+        uses: c-py/action-dotenv-to-setenv@v3
+        with:
+          env-file: .build.env
+
+      - name: Prepare Workflow Environment
+        id: prep
+        run: |
+          docker network create docker_default
+          docker pull appropriate/curl:latest
+          DOCKERHUB_IMAGENAME=docker.io/smalswebtech/prometheus-s3-exporter
+          GHCR_IMAGENAME=ghcr.io/smals-webtech/prometheus-s3-exporter
+          VERSION_MAJOR_MINOR_PATCH=${{ env.EXPORTER_VERSION }}
+          VERSION_MAJOR_MINOR=${VERSION_MAJOR_MINOR_PATCH%.*}
+          VERSION_MAJOR=${VERSION_MAJOR_MINOR%.*}
+          echo ::set-output name=dockerhub_image::${DOCKERHUB_IMAGENAME}
+          echo ::set-output name=ghcr_image::${GHCR_IMAGENAME}
+          echo ::set-output name=version_major_minor_patch::${VERSION_MAJOR_MINOR_PATCH}
+          echo ::set-output name=version_major_minor::${VERSION_MAJOR_MINOR}
+          echo ::set-output name=version_major::${VERSION_MAJOR}
+          echo ::set-output name=build_date::$(date -u +'%Y-%m-%dT%H:%M:%SZ')
+
+      - name: Fill GHCR Docker Prometheus Exporter Image metadata
+        id: meta_ghcr
+        uses: crazy-max/ghaction-docker-meta@v1
+        with:
+          images: "${{ steps.prep.outputs.ghcr_image }}"
+          tag-sha: false
+          tag-edge: false
+          tag-latest: false
+          tag-custom: |
+            ${{ env.CI_SHA_SHORT }}
+            ${{ steps.prep.outputs.version_major_minor_patch }}
+            ${{ steps.prep.outputs.version_major_minor }}
+            ${{ steps.prep.outputs.version_major }}
+            latest
+
+      - name: Fill DockerHub Docker Prometheus Exporter Image metadata
+        id: meta_dockerhub
+        uses: crazy-max/ghaction-docker-meta@v1
+        with:
+          images: "${{ steps.prep.outputs.dockerhub_image }}"
+          tag-sha: false
+          tag-edge: false
+          tag-latest: false
+          tag-custom: |
+            ${{ steps.prep.outputs.version_major_minor_patch }}
+            ${{ steps.prep.outputs.version_major_minor }}
+            ${{ steps.prep.outputs.version_major }}
+            latest
+
+      - name: Login to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v1
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GHCR_TOKEN }}
+
+      - name: Login to DockerHub
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v1
+        with:
+          registry: docker.io
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_PASSWORD }}
+
+      - name: Set up Docker Buildx
+        id: buildx
+        uses: docker/setup-buildx-action@v1
+
+      - name: Cache Docker layers
+        uses: actions/cache@v2
+        with:
+          path: /tmp/.buildx-cache
+          key: ${{ runner.os }}-buildx-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-buildx-
+
+      - name: Build GHCR Prometheus Exporter Docker Image
+        id: build_ghcr_image
+        uses: docker/build-push-action@v2
+        with:
+          builder: ${{ steps.buildx.outputs.name }}
+          context: .
+          file: Dockerfile
+          build-args: |
+            AWS_CLI_VERSION_ARG=${{ env.AWS_CLI_VERSION }}
+            VERSION_ARG=${{ env.EXPORTER_VERSION }}
+            RELEASE_ARG=${{ env.CI_RUN_ID }}
+            VCS_REF_ARG=${{ env.CI_SHA }}
+            BUILD_DATE_ARG=${{ steps.prep.outputs.build_date }}
+          push: false
+          load: true
+          tags: ${{ steps.meta_ghcr.outputs.tags }}
+          labels: ${{ steps.meta_ghcr.outputs.labels }}
+
+      - name: Scan GHCR Prometheus Exporter Docker Image
+        uses: azure/container-scan@v0
+        with:
+          image-name: ${{ steps.prep.outputs.ghcr_image }}:${{ env.CI_SHA_SHORT }}
+          severity-threshold: CRITICAL
+
+      - name: Test Prometheus Exporter Docker Image
+        env: 
+          EXPORTER_DOCKER_IMAGE_NAME: ${{ steps.prep.outputs.ghcr_image }}:${{ env.CI_SHA_SHORT }}
+        run: |
+          bats -r test/tests.bats
+
+      - name: Push GHCR Prometheus Exporter Docker Image
+        id: push_ghcr
+        uses: docker/build-push-action@v2
+        with:
+          builder: ${{ steps.buildx.outputs.name }}
+          context: .
+          file: Dockerfile
+          build-args: |
+            AWS_CLI_VERSION_ARG=${{ env.AWS_CLI_VERSION }}
+            VERSION_ARG=${{ env.EXPORTER_VERSION }}
+            RELEASE_ARG=${{ env.CI_RUN_ID }}
+            VCS_REF_ARG=${{ env.CI_SHA }}
+            BUILD_DATE_ARG=${{ steps.prep.outputs.build_date }}
+          push: ${{ github.event_name != 'pull_request' && github.ref == 'refs/heads/master' }}
+          tags: ${{ steps.meta_ghcr.outputs.tags }}
+          labels: ${{ steps.meta_ghcr.outputs.labels }}
+
+      - name: Push DockerHub Prometheus Exporter Docker Image
+        id: push_dockerhub
+        uses: docker/build-push-action@v2
+        with:
+          builder: ${{ steps.buildx.outputs.name }}
+          context: .
+          file: Dockerfile
+          build-args: |
+            AWS_CLI_VERSION_ARG=${{ env.AWS_CLI_VERSION }}
+            VERSION_ARG=${{ env.EXPORTER_VERSION }}
+            RELEASE_ARG=${{ env.CI_RUN_ID }}
+            VCS_REF_ARG=${{ env.CI_SHA }}
+            BUILD_DATE_ARG=${{ steps.prep.outputs.build_date }}
+          push: ${{ github.event_name != 'pull_request' && github.ref == 'refs/heads/master' }}
+          tags: ${{ steps.meta_dockerhub.outputs.tags }}
+          labels: ${{ steps.meta_dockerhub.outputs.labels }}
+
+      - name: Check GHCR Prometheus Exporter Docker Image
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/master'
+        run: |
+          docker buildx imagetools inspect ${{ steps.prep.outputs.ghcr_image }}:${{ steps.prep.outputs.version_major_minor_patch }}
+
+      - name: Check DockerHub Prometheus Exporter Docker Image
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/master'
+        run: |
+          docker buildx imagetools inspect ${{ steps.prep.outputs.dockerhub_image }}:${{ steps.prep.outputs.version_major_minor_patch }}
+
+      - name: Check GHCR Prometheus Exporter Docker Images pull's
+        if: github.GHCR != 'pull_request' && github.ref == 'refs/heads/master'
+        run: |
+          docker pull ${{ steps.prep.outputs.ghcr_image }}:${{ steps.prep.outputs.version_major_minor_patch }}
+
+      - name: Check DockerHub Prometheus Exporter Docker Images pull's
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/master'
+        run: |
+          docker pull ${{ steps.prep.outputs.dockerhub_image }}:${{ steps.prep.outputs.version_major_minor_patch }}
+

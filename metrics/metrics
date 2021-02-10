@@ -88,15 +88,24 @@ function join_by { local d=$1; shift; echo -n "$1"; shift; printf "%s" "${@/#/$d
 #
 
 #
-# BEGIN extract metrics from S3 bucket
-function metrics_size {
+# BEGIN retrieve listing from S3 bucket
+function list_bucket {
 
     if [ ! -z "$AWS_ENDPOINT_URL" ]; then
       #echo "Found AWS_ENDPOINT_URL environment variable.  Add --endpoint-run argument to AWS CLI"
       AWS_CLI_EXTRA_ARGS="${AWS_CLI_EXTRA_ARGS} --endpoint-url ${AWS_ENDPOINT_URL}"
     fi
 
-    size=$(aws s3 ls --recursive ${S3_BUCKET_NAME} ${AWS_CLI_EXTRA_ARGS} | awk 'BEGIN {total=0}{total+=$3}END{print total/1024""}')
+    list=$(aws s3 ls --recursive ${S3_BUCKET_NAME} ${AWS_CLI_EXTRA_ARGS} > $1)
+
+}
+#
+
+#
+# BEGIN extract metrics from S3 bucket
+function metrics_size {
+
+    size=$(cat $1 | awk 'BEGIN {total=0}{total+=$3}END{print total/1024""}')
 
     buildMetric "bucket_size_kbytes" "gauge" "From bucket S3"
     addMetricContent "bucket_size_kbytes" "{name=\"${S3_BUCKET_NAME}\"} ${size}"
@@ -109,12 +118,7 @@ function metrics_size {
 # BEGIN extract metrics from S3 bucket
 function metrics_count {
 
-    if [ ! -z "$AWS_ENDPOINT_URL" ]; then
-      #echo "Found AWS_ENDPOINT_URL environment variable.  Add --endpoint-run argument to AWS CLI"
-      AWS_CLI_EXTRA_ARGS="${AWS_CLI_EXTRA_ARGS} --endpoint-url ${AWS_ENDPOINT_URL}"
-    fi
-
-    count=$(aws s3 ls --recursive ${S3_BUCKET_NAME} ${AWS_CLI_EXTRA_ARGS} | wc -l)
+    count=$(cat $1 | wc -l)
 
     buildMetric "bucket_count_total" "counter" "From bucket S3"
     addMetricContent "bucket_count_total" "{name=\"${S3_BUCKET_NAME}\"} ${count}"
@@ -124,12 +128,14 @@ function metrics_count {
 #
 
 if [ "$1" = "get" ]; then 
-    metrics_$3 > "/tmp/$2/$3"
+    metrics_$3 "/tmp/$2/bucket.list" > "/tmp/$2/$3"
 else
     run=$(join_by , ${exporters[*]})
 
     # make temp dir
     mkdir -p /tmp/$$/
+
+    list_bucket "/tmp/$$/bucket.list"
 
     # we're using xargs to run this script in multiple subprocesses
     # xargs will handle collecting data for us

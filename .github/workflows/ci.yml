@@ -1,6 +1,9 @@
 name: Continuous Docker Image Build
 
 on:
+  schedule:
+    - cron: '0 3 * * 1' # everyday monday at 3am
+
   push:
     branches:
       - '**'

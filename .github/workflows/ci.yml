@@ -51,32 +51,26 @@ jobs:
 
       - name: Fill GHCR Docker Prometheus Exporter Image metadata
         id: meta_ghcr
-        uses: crazy-max/ghaction-docker-meta@v1
+        uses: crazy-max/ghaction-docker-meta@v2.2.1
         with:
           images: "${{ steps.prep.outputs.ghcr_image }}"
-          tag-sha: false
-          tag-edge: false
-          tag-latest: false
-          tag-custom: |
-            ${{ env.CI_SHA_SHORT }}
-            ${{ steps.prep.outputs.version_major_minor_patch }}
-            ${{ steps.prep.outputs.version_major_minor }}
-            ${{ steps.prep.outputs.version_major }}
-            latest
-
+          tags: |            
+            type=raw,value=${{ env.CI_SHA_SHORT }}
+            type=raw,value=${{ steps.prep.outputs.version_major_minor_patch }}
+            type=raw,value=${{ steps.prep.outputs.version_major_minor }}
+            type=raw,value=${{ steps.prep.outputs.version_major }}
+            type=raw,value=latest
+            
       - name: Fill DockerHub Docker Prometheus Exporter Image metadata
         id: meta_dockerhub
-        uses: crazy-max/ghaction-docker-meta@v1
+        uses: crazy-max/ghaction-docker-meta@v2.2.1
         with:
           images: "${{ steps.prep.outputs.dockerhub_image }}"
-          tag-sha: false
-          tag-edge: false
-          tag-latest: false
-          tag-custom: |
-            ${{ steps.prep.outputs.version_major_minor_patch }}
-            ${{ steps.prep.outputs.version_major_minor }}
-            ${{ steps.prep.outputs.version_major }}
-            latest
+          tags: |            
+            type=raw,value=${{ steps.prep.outputs.version_major_minor_patch }}
+            type=raw,value=${{ steps.prep.outputs.version_major_minor }}
+            type=raw,value=${{ steps.prep.outputs.version_major }}
+            type=raw,value=latest
 
       - name: Login to GHCR
         if: github.event_name != 'pull_request'

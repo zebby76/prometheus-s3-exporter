@@ -51,7 +51,7 @@ jobs:
 
       - name: Fill GHCR Docker Prometheus Exporter Image metadata
         id: meta_ghcr
-        uses: crazy-max/ghaction-docker-meta@v2.2.1
+        uses: crazy-max/ghaction-docker-meta@v2.3.0
         with:
           images: "${{ steps.prep.outputs.ghcr_image }}"
           tags: |            
@@ -63,7 +63,7 @@ jobs:
             
       - name: Fill DockerHub Docker Prometheus Exporter Image metadata
         id: meta_dockerhub
-        uses: crazy-max/ghaction-docker-meta@v2.2.1
+        uses: crazy-max/ghaction-docker-meta@v2.3.0
         with:
           images: "${{ steps.prep.outputs.dockerhub_image }}"
           tags: |            

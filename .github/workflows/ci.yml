@@ -102,7 +102,7 @@ jobs:
 
       - name: Build GHCR Prometheus Exporter Docker Image
         id: build_ghcr_image
-        uses: docker/build-push-action@v2.5.0
+        uses: docker/build-push-action@v2.7.0
         with:
           builder: ${{ steps.buildx.outputs.name }}
           context: .
@@ -132,7 +132,7 @@ jobs:
 
       - name: Push GHCR Prometheus Exporter Docker Image
         id: push_ghcr
-        uses: docker/build-push-action@v2.5.0
+        uses: docker/build-push-action@v2.7.0
         with:
           builder: ${{ steps.buildx.outputs.name }}
           context: .
@@ -149,7 +149,7 @@ jobs:
 
       - name: Push DockerHub Prometheus Exporter Docker Image
         id: push_dockerhub
-        uses: docker/build-push-action@v2.5.0
+        uses: docker/build-push-action@v2.7.0
         with:
           builder: ${{ steps.buildx.outputs.name }}
           context: .

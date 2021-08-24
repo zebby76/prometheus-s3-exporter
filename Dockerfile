@@ -1,4 +1,4 @@
-FROM docker.io/alpine:3.13
+FROM docker.io/alpine:3.14
 
 ARG VERSION_ARG=""
 ARG RELEASE_ARG=""

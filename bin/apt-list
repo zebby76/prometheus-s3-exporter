@@ -1,0 +1,65 @@
+#!/bin/bash
+
+# usage function
+function usage()
+{
+   cat << HEREDOC
+
+   Usage: $progname [--yaml]
+
+   optional arguments:
+     -h, --help           show this help message and exit
+     -y, --yaml           Output in yaml
+
+HEREDOC
+}
+
+# initialize variables
+progname=$(basename $0)
+yaml=0
+firstline=1
+
+# use getopt and store the output into $OPTS
+# note the use of -o for the short options, --long for the long name options
+# and a : for any option that takes a parameter
+OPTS=$(getopt -o "hy" --long "help,yaml" -n "$progname" -- "$@")
+if [ $? != 0 ] ; then echo "Error in command line arguments." >&2 ; usage; exit 1 ; fi
+eval set -- "$OPTS"
+
+while true; do
+  # uncomment the next line to see how shift is working
+  # echo "\$1:\"$1\" \$2:\"$2\""
+  case "$1" in
+    -h | --help ) usage; exit; ;;
+    -y | --yaml ) yaml=$((yaml + 1)); shift ;;
+    -- ) shift; break ;;
+    * ) break ;;
+  esac
+done
+
+# Main Script
+_LIST=`apt-cache pkgnames`
+_SORTED_LIST=$(echo $_LIST|tr " " "\n"|sort|tr "\n" " ")
+
+for PACKAGE in $_SORTED_LIST;
+do
+  _TEMP=$(apt-cache show $PACKAGE )
+  _VERSION=$(echo "$_TEMP" | grep '.*Version:.*' | sed -e 's/.*Version:\(.*\)/\1/g' | tr -d '[[:space:]]' )
+  _DESCRIPTION=$(echo "$_TEMP" | grep '.*Description:.*' | sed -e 's/.*Description:\(.*\)/\1/g' | tr -d '\n' )
+  _SIZE=$(echo "$_TEMP" | grep '.*Installed-Size:.*' | sed -e 's/.*Installed-Size:\(.*\)/\1/g' | tr -d '[[:space:]]' )
+
+  if (( $yaml > 0 )); then
+    if (( $firstline > 0)); then
+      printf "Packages:\n"
+      firstline=0
+    fi
+    printf "  - name: $PACKAGE\n"
+    printf "    version: $_VERSION\n"
+    printf "    description: |\n"
+    printf "      $_DESCRIPTION\n"
+    printf "    size: $_SIZE\n"
+  else
+    printf "$PACKAGE : $_VERSION\n"
+  fi
+
+done

@@ -1,0 +1,35 @@
+from setuptools import setup, find_packages
+
+setup(
+    name="prometheus-s3-exporter",
+    version="2.0.0",
+    description="WebTech Monitoring - Expose S3 bucket size as a Prometheus Metric.",
+    url="https://github.com/Smals-Webtech/prometheus-s3-exporter-docker",
+    author="Sebastian Molle",
+    author_email="sebastian.molle@smals.be",
+    license="MIT",
+    classifiers=[
+        "Development Status :: 4 - Beta",
+        "Intended Audience :: Developers",
+        "Intended Audience :: System Administrators",
+        "Topic :: System :: Monitoring",
+        "License :: OSI Approved :: MIT License",
+        "Programming Language :: Python :: 3",
+        "Programming Language :: Python :: 3.4",
+        "Programming Language :: Python :: 3.5",
+        "Programming Language :: Python :: 3.6",
+        "Programming Language :: Python :: 3.7",
+        "Programming Language :: Python :: 3.8",
+        "Programming Language :: Python :: 3.9",
+    ],
+    keywords="monitoring prometheus s3",
+    packages=find_packages(exclude=["tests"]),
+    install_requires=[
+        "prometheus-client==0.9.0",
+        "PyYAML==5.4.1",
+        "requests==2.25.1",
+        "falcon==2.0.0",
+        "boto3==1.20.1",
+    ],
+    entry_points={"console_scripts": ["exporter=exporter:main"]},
+)

@@ -20,7 +20,7 @@ services:
     container_name: exporter
     environment:
       - OPENSHIFT_NODE_HOSTNAME=node1.openshift.cloud.vm
-      - OPENSHIFT_NAMESPACE=default-namespace
+      - OPENSHIFT_NAMESPACE=${BATS_OPENSHIFT_NAMESPACE}
       - AWS_ACCESS_KEY_ID=${BATS_S3_ACCESS_KEY_ID}
       - AWS_SECRET_ACCESS_KEY=${BATS_S3_SECRET_ACCESS_KEY}
       - AWS_DEFAULT_REGION=${BATS_S3_DEFAULT_REGION}
@@ -30,15 +30,7 @@ services:
       - 9773:9773
     networks:
       - default
-    build:
-      context: .
-      args:
-        VERSION_ARG: ${DOCKER_IMAGE_VERSION}
-        BUILD_DATE_ARG: ${BUILD_DATE}
-        RELEASE_ARG: ${RELEASE_NUMBER}
-        VCS_REF_ARG: ${VCS_REF}
-        AWS_CLI_VERSION_ARG: ${AWS_CLI_VERSION}
-    mem_limit: 128m
+    mem_limit: 64m
 
 networks:
   default:

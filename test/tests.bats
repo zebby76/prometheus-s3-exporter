@@ -6,6 +6,8 @@ load "helpers/dataloaders"
 load "lib/batslib"
 load "lib/output"
 
+export BATS_OPENSHIFT_NAMESPACE="default-namespace"
+
 export BATS_S3_BUCKET_NAME="s3bucket-example"
 export BATS_S3_ENDPOINT_URL="http://localhost:4572"
 export BATS_S3_ACCESS_KEY_ID="mock"
@@ -16,7 +18,7 @@ export AWS_ACCESS_KEY_ID="${BATS_S3_ACCESS_KEY_ID}"
 export AWS_SECRET_ACCESS_KEY="${BATS_S3_SECRET_ACCESS_KEY}"
 export AWS_DEFAULT_REGION="${BATS_S3_DEFAULT_REGION}"
 
-export BATS_EXPORTER_DOCKER_IMAGE_NAME="${EXPORTER_DOCKER_IMAGE_NAME:-docker.io/zebby76/prometheus-s3-exporter:rc}"
+export BATS_EXPORTER_DOCKER_IMAGE_NAME="${EXPORTER_DOCKER_IMAGE_NAME:-docker.io/smalswebtech/prometheus-s3-exporter:rc}"
 
 @test "[$TEST_FILE] Pull all Docker images" {
   command docker-compose -f ${BATS_TEST_DIRNAME%/}/docker-compose.yml pull s3 
@@ -44,17 +46,19 @@ export BATS_EXPORTER_DOCKER_IMAGE_NAME="${EXPORTER_DOCKER_IMAGE_NAME:-docker.io/
 }
 
 @test "[$TEST_FILE] Test 'WebTech S3 Exporter (Prometheus Exporter)' /health" {
-  retry 12 5 curl_container exporter :9773/health -s -w %{http_code} -o /dev/null
+  retry 12 5 curl_container exporter :9774/health -s -w %{http_code} -o /dev/null
   assert_output -l 0 $'200'
-  retry 12 5 curl_container exporter :9773/health -s
-  assert_output -l -r 'OK'
+  retry 12 5 curl_container exporter :9774/health -s
+  assert_output -l "{\"status\": true}"
 }
 
 @test "[$TEST_FILE] Test 'WebTech S3 Exporter (Prometheus Exporter)' /metrics" {
   retry 12 5 curl_container exporter :9773/metrics -s -w %{http_code} -o /dev/null
   assert_output -l 0 $'200'
   retry 12 5 curl_container exporter :9773/metrics -s
-  assert_output -l "webtech_s3_bucket_count_total{name=\"${BATS_S3_BUCKET_NAME}\"} 5"
+  assert_output -l "webtech_s3_exporter_up 1.0"
+  assert_output -l "webtech_s3_exporter_status{name=\"${BATS_S3_BUCKET_NAME}\",namespace=\"${BATS_OPENSHIFT_NAMESPACE}\"} 1.0"
+  assert_output -l "webtech_s3_bucket_count_total{name=\"${BATS_S3_BUCKET_NAME}\",namespace=\"${BATS_OPENSHIFT_NAMESPACE}\"} 5.0"
 }
 
 @test "[$TEST_FILE] Stop all and delete test containers" {

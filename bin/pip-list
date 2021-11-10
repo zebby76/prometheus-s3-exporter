@@ -1,0 +1,61 @@
+#!/bin/bash
+
+# usage function
+function usage()
+{
+   cat << HEREDOC
+
+   Usage: $progname [--yaml]
+
+   optional arguments:
+     -h, --help           show this help message and exit
+     -y, --yaml           Output in yaml
+
+HEREDOC
+}
+
+# initialize variables
+progname=$(basename $0)
+yaml=0
+firstline=1
+
+# use getopt and store the output into $OPTS
+# note the use of -o for the short options, --long for the long name options
+# and a : for any option that takes a parameter
+OPTS=$(getopt -o "hy" --long "help,yaml" -n "$progname" -- "$@")
+if [ $? != 0 ] ; then echo "Error in command line arguments." >&2 ; usage; exit 1 ; fi
+eval set -- "$OPTS"
+
+while true; do
+  # uncomment the next line to see how shift is working
+  # echo "\$1:\"$1\" \$2:\"$2\""
+  case "$1" in
+    -h | --help ) usage; exit; ;;
+    -y | --yaml ) yaml=$((yaml + 1)); shift ;;
+    -- ) shift; break ;;
+    * ) break ;;
+  esac
+done
+
+# Main Script
+_SORTED_LIST=$(pip3 list --format=freeze | tr -d "[0-9](.=)" | sort | uniq)
+
+for _PACKAGE in $_SORTED_LIST;
+do
+  _VERSION=$(pip3 show ${_PACKAGE} | grep -e "^Version: .*$" | sed -E "s|^Version: (.*)$|\1|")
+  _DESCRIPTION=$(pip3 show ${_PACKAGE} | grep -e "^Summary: .*$" | sed -E "s|^Summary: (.*)$|\1|")
+
+  if (( $yaml > 0 )); then
+    if (( $firstline > 0)); then
+      printf "Packages:\n"
+      firstline=0
+    fi
+    printf "  - name: $_PACKAGE\n"
+    printf "    version: $_VERSION\n"
+    printf "    description: $_DESCRIPTION\n"
+    printf "    size: 0\n"
+  else
+    printf "$_PACKAGE : $_VERSION\n"
+  fi
+
+done

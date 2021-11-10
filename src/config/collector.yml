@@ -1,0 +1,3 @@
+kind: PrometheusExporterConfig
+configuration:
+  - interval: 1    # (minutes)

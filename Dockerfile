@@ -26,9 +26,12 @@ ENV PATH=/opt/bin:${PATH} \
 COPY src/ /opt/src
 COPY bin/ /opt/bin
 
-RUN mkdir -p /opt/bin /opt/src /opt/etc \
+RUN ln -s /opt/bin/apk-list /usr/local/bin/apk-list \
+    && ln -s /opt/bin/apt-list /usr/local/bin/apt-list \
+    && ln -s /opt/bin/pip-list /usr/local/bin/pip-list \
+    && mkdir -p /opt/bin /opt/src /opt/etc \
     && apt-get -y update \
-    && apt-get -y install --no-install-recommends build-essential dh-autoreconf \
+    && apt-get -y install --no-install-recommends build-essential dh-autoreconf curl \
     && echo "Add default user ..." \
     && addgroup --gid 1001 default \
     && adduser --system --uid 1001 --gid 1001 --disabled-login --no-create-home default \
@@ -50,3 +53,6 @@ EXPOSE 9773/tcp
 EXPOSE 9774/tcp
 
 ENTRYPOINT ["python3", "-u", "/usr/local/bin/exporter"]
+
+HEALTHCHECK --start-period=10s --interval=1m --timeout=5s --retries=5 \
+        CMD curl --fail --header "Host: localhost" http://localhost:9774/health || exit 1

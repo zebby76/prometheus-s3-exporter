@@ -2,10 +2,10 @@ version: "2"
 
 services:
   s3:
-    image: docker.io/localstack/localstack:0.8.8
+    image: docker.io/localstack/localstack:0.12.20
     container_name: s3
     ports:
-      - 4572:4572
+      - 4566:4566
     environment:
       - SERVICES=s3
       - DEBUG=true

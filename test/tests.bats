@@ -9,7 +9,7 @@ load "lib/output"
 export BATS_OPENSHIFT_NAMESPACE="default-namespace"
 
 export BATS_S3_BUCKET_NAME="s3bucket-example"
-export BATS_S3_ENDPOINT_URL="http://localhost:4572"
+export BATS_S3_ENDPOINT_URL="http://localhost:4566"
 export BATS_S3_ACCESS_KEY_ID="mock"
 export BATS_S3_SECRET_ACCESS_KEY="mock"
 export BATS_S3_DEFAULT_REGION="us-east-1"
@@ -41,7 +41,7 @@ export BATS_EXPORTER_DOCKER_IMAGE_NAME="${EXPORTER_DOCKER_IMAGE_NAME:-docker.io/
 }
 
 @test "[$TEST_FILE] Starting 'WebTech S3 Exporter (Prometheus Exporter)' Service" {
-  export BATS_S3_ENDPOINT_URL=http://$(docker_ip s3):4572
+  export BATS_S3_ENDPOINT_URL=http://$(docker_ip s3):4566
   command docker-compose -f ${BATS_TEST_DIRNAME%/}/docker-compose.yml up -d exporter
 }
 

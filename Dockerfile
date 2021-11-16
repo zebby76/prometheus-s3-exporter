@@ -1,5 +1,6 @@
 FROM python:3.9-slim
 
+ARG AWS_CLI_VERSION_ARG=""
 ARG VERSION_ARG=""
 ARG RELEASE_ARG=""
 ARG BUILD_DATE_ARG=""
@@ -21,7 +22,9 @@ USER root
 WORKDIR /opt/src
 
 ENV PATH=/opt/bin:${PATH} \
-    VERSION=${VERSION_ARG}-${RELEASE_ARG}
+    VERSION=${VERSION_ARG}-${RELEASE_ARG} \
+    AWS_CLI_VERSION=${AWS_CLI_VERSION_ARG} \
+    AWS_CLI_DOWNLOAD_URL="https://github.com/aws/aws-cli/archive" 
 
 COPY src/ /opt/src
 COPY bin/ /opt/bin
@@ -35,7 +38,14 @@ RUN ln -s /opt/bin/apk-list /usr/local/bin/apk-list \
     && echo "Add default user ..." \
     && addgroup --gid 1001 default \
     && adduser --system --uid 1001 --gid 1001 --disabled-login --no-create-home default \
+    && echo "Download and install aws-cli ..." \
+    && mkdir -p /tmp/aws-cli \
+    && curl -sSfLk ${AWS_CLI_DOWNLOAD_URL}/${AWS_CLI_VERSION}.tar.gz | tar -xzC /tmp/aws-cli --strip-components=1 \
+    && cd /tmp/aws-cli \
+    && python3 setup.py install \
+    && rm -Rf /tmp/aws-cli /var/cache/apk/* \
     && echo "Configure application ..." \
+    && cd /opt/src \
     && pip3 install -e . \
     && chown 1001:0 -Rf /opt/bin /opt/src \
     && chmod -Rf ug+rw /opt/bin /opt/src \

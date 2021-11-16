@@ -108,6 +108,7 @@ jobs:
           context: .
           file: Dockerfile
           build-args: |
+            AWS_CLI_VERSION_ARG=${{ env.AWS_CLI_VERSION }}
             VERSION_ARG=${{ env.EXPORTER_VERSION }}
             RELEASE_ARG=${{ env.CI_RUN_ID }}
             VCS_REF_ARG=${{ env.CI_SHA }}
@@ -137,6 +138,7 @@ jobs:
           context: .
           file: Dockerfile
           build-args: |
+            AWS_CLI_VERSION_ARG=${{ env.AWS_CLI_VERSION }}
             VERSION_ARG=${{ env.EXPORTER_VERSION }}
             RELEASE_ARG=${{ env.CI_RUN_ID }}
             VCS_REF_ARG=${{ env.CI_SHA }}
@@ -153,6 +155,7 @@ jobs:
           context: .
           file: Dockerfile
           build-args: |
+            AWS_CLI_VERSION_ARG=${{ env.AWS_CLI_VERSION }}
             VERSION_ARG=${{ env.EXPORTER_VERSION }}
             RELEASE_ARG=${{ env.CI_RUN_ID }}
             VCS_REF_ARG=${{ env.CI_SHA }}

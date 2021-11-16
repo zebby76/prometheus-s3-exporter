@@ -3,7 +3,8 @@
 ## Build
 
 ```
-docker build --build-arg VERSION_ARG=snapshot \
+docker build --build-arg AWS_CLI_VERSION_ARG=1.20.58 \
+             --build-arg VERSION_ARG=snapshot \
              --build-arg RELEASE_ARG=snapshot \
              --build-arg BUILD_DATE_ARG=snapshot \
              --build-arg VCS_REF_ARG=snapshot \

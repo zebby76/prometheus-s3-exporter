@@ -107,7 +107,7 @@ jobs:
           builder: ${{ steps.buildx.outputs.name }}
           context: .
           file: Dockerfile
-          build-args: |
+          build-args: |-
             AWS_CLI_VERSION_ARG=${{ env.AWS_CLI_VERSION }}
             VERSION_ARG=${{ env.EXPORTER_VERSION }}
             RELEASE_ARG=${{ env.CI_RUN_ID }}
@@ -137,7 +137,7 @@ jobs:
           builder: ${{ steps.buildx.outputs.name }}
           context: .
           file: Dockerfile
-          build-args: |
+          build-args: |-
             AWS_CLI_VERSION_ARG=${{ env.AWS_CLI_VERSION }}
             VERSION_ARG=${{ env.EXPORTER_VERSION }}
             RELEASE_ARG=${{ env.CI_RUN_ID }}
@@ -154,7 +154,7 @@ jobs:
           builder: ${{ steps.buildx.outputs.name }}
           context: .
           file: Dockerfile
-          build-args: |
+          build-args: |-
             AWS_CLI_VERSION_ARG=${{ env.AWS_CLI_VERSION }}
             VERSION_ARG=${{ env.EXPORTER_VERSION }}
             RELEASE_ARG=${{ env.CI_RUN_ID }}

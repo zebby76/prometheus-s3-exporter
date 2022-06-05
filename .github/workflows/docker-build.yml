@@ -1,0 +1,71 @@
+name: Docker Build
+
+on:
+  push:
+    branches:
+      - '**'
+  pull_request:
+
+jobs:
+
+  build-docker-images:
+
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Fill GitHub Environment Variables
+        uses: FranzDiebold/github-env-vars-action@v2
+
+      - name: Fill PHP Version Environment Variable
+        uses: c-py/action-dotenv-to-setenv@v3
+        with:
+          env-file: .build.env
+
+      - name: Prepare Workflow Environment
+        id: prep
+        run: |
+          echo ::set-output name=docker-image-name::${DOCKER_IMAGE_NAME}
+          echo ::set-output name=build-date::$(date -u +'%Y-%m-%dT%H:%M:%SZ')
+
+      - name: Fill Docker Image metadata
+        id: meta
+        uses: docker/metadata-action@v4
+        with:
+          images: "${{ steps.prep.outputs.docker-image-name }}"
+          tags: |
+            type=raw,value=rc
+
+      - name: Set up Docker Buildx
+        id: buildx
+        uses: docker/setup-buildx-action@v2
+
+      - name: Cache Docker layers
+        uses: actions/cache@v3
+        with:
+          path: /tmp/.buildx-cache
+          key: ${{ runner.os }}-buildx-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-buildx-
+
+      - name: Build Docker Image
+        id: build
+        uses: docker/build-push-action@v3
+        with:
+          builder: ${{ steps.buildx.outputs.name }}
+          context: .
+          file: Dockerfile
+          build-args: |
+            VERSION_ARG=rc
+            RELEASE_ARG=${{ env.CI_RUN_ID }}
+            VCS_REF_ARG=${{ env.CI_SHA }}
+            BUILD_DATE_ARG=${{ steps.prep.outputs.build-date }}
+          push: false
+          load: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+
+      - name: Check Docker Image
+        run: |
+          docker image inspect ${{ steps.prep.outputs.docker-image-name }}:rc

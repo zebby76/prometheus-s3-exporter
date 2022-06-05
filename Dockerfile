@@ -1,4 +1,4 @@
-FROM python:3.9-slim
+FROM python:3.10-slim-buster
 
 ARG AWS_CLI_VERSION_ARG=""
 ARG VERSION_ARG=""

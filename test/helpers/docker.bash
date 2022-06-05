@@ -22,12 +22,26 @@ function docker_id {
 # → true/false
 # fails if the container does not exist
 function docker_running_state {
-	docker inspect -f {{.State.Running}} $1
+	docker inspect --format '{{ .State.Running }}' $1
+}
+
+# get the health state of container $1
+# fails if the container does not exist
+function docker_health_state() {
+	docker inspect --format '{{ .State.Health.Status }}' $1
 }
 
 # get the docker container $1 PID
 function docker_pid {
 	docker inspect --format {{.State.Pid}} $1
+}
+
+# asserts state from container $1 contains healthy
+function docker_assert_healthy {
+	local -r container=$1
+	shift
+	docker_health_state $container
+	assert_output -l "healthy"
 }
 
 # asserts logs from container $1 contains $2
@@ -58,6 +72,16 @@ function docker_wait_for_log {
 	local -ir timeout_sec=$2
 	shift 2
 	retry $(( $timeout_sec * 2 )) .5s docker_assert_log $container "$*"
+}
+
+# wait for a container healthy state
+# $1 container
+# $2 timeout in second
+function docker_wait_for_healthy {
+	local -r container=$1
+	local -ir timeout_sec=$2
+	shift 2
+	retry $(( $timeout_sec * 2 )) .5s docker_assert_healthy $container
 }
 
 # Create a docker container named $1 which exposes the docker host unix

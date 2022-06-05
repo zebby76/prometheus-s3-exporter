@@ -25,6 +25,7 @@ jobs:
       github-ci-run-id: ${{ steps.prep.outputs.github-ci-run-id }}
       github-ci-sha-short: ${{ steps.prep.outputs.github-ci-sha-short }}
       github-ci-sha: ${{ steps.prep.outputs.github-ci-sha }}
+      aws-cli-version: ${{ steps.prep.outputs.aws-cli-version }}
 
     steps:
       - uses: actions/checkout@v3
@@ -52,6 +53,7 @@ jobs:
           echo ::set-output name=github-ci-sha-short::${CI_SHA_SHORT}
           echo ::set-output name=github-ci-sha::${CI_SHA}
           echo ::set-output name=github-ci-run-id::${CI_RUN_ID}
+          echo ::set-output name=aws-cli-version::${AWS_CLI_VERSION}
 
       - name: Fill Docker Image metadata
         id: meta
@@ -96,6 +98,7 @@ jobs:
             RELEASE_ARG=${{ needs.init.outputs.github-ci-run-id }}
             VCS_REF_ARG=${{ needs.init.outputs.github-ci-sha }}
             BUILD_DATE_ARG=${{ needs.init.outputs.build-date }}
+            AWS_CLI_VERSION_ARG={{ needs.init.outputs.aws-cli-version }}
           tags: ${{ needs.init.outputs.docker-image-tags }}
           labels: ${{ needs.init.outputs.docker-image-labels }}
           outputs: type=docker,dest=/tmp/myimage.tar

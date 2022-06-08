@@ -1,6 +1,6 @@
 # Test if requirements are met
 (
-	type docker &>/dev/null || ( echo "docker is not available"; exit 1 )
+  type docker &>/dev/null || ( echo "docker is not available"; exit 1 )
 )>&2
 
 TEST_FILE=$(basename $BATS_TEST_FILENAME .bats)
@@ -9,12 +9,12 @@ TEST_FILE=$(basename $BATS_TEST_FILENAME .bats)
 #
 # $1 optional label value
 function stop_bats_containers {
-	docker-compose stop $1
+  docker-compose stop $1
 }
 
 # delete all containers
 docker_cleanup() {
-	docker-compose down -v
+  docker-compose down -v
 }
 
 # Send a HTTP request to container $1 for path $2 and
@@ -24,15 +24,15 @@ docker_cleanup() {
 # $2 HTTP path to query
 # $@ additional options to pass to the curl command
 function curl_container {
-	local -r container=$1
-	local -r path=$2
-	shift 2
-	docker run --rm --net=docker_default --label bats-type="curl" appropriate/curl --silent \
-		--connect-timeout 5 \
-		--max-time 20 \
-		--retry 4 --retry-delay 5 \
-		"$@" \
-		http://$(docker_ip $container)${path}
+  local -r container=$1
+  local -r path=$2
+  shift 2
+  docker run --rm --net=docker_default --label bats-type="curl" appropriate/curl --silent \
+    --connect-timeout 5 \
+    --max-time 20 \
+    --retry 4 --retry-delay 5 \
+    "$@" \
+    http://$(docker_ip $container)${path}
 }
 
 # Retry a command $1 times until it succeeds. Wait $2 seconds between retries.

@@ -14,7 +14,7 @@ import urllib
 class HealthMetricsHandler:
     def on_get(self, req, resp):
         resp.set_header("Content-Type", "text/html")
-        resp.body = '{"status": true}'
+        resp.text = '{"status": true}'
 
 
 class CustomMetricsHandler:
@@ -30,7 +30,7 @@ class CustomMetricsHandler:
         except:
             self.send_error(500, "error generating metric output")
             raise
-        resp.body = output
+        resp.text = output
 
 
 def exporter(port=9773, addr="0.0.0.0"):
@@ -39,7 +39,7 @@ def exporter(port=9773, addr="0.0.0.0"):
     logging.basicConfig(level=logging.DEBUG)
     LOGGER = logging.getLogger(__name__)
 
-    api = falcon.API()
+    api = falcon.App()
     api.add_route("/metrics", CustomMetricsHandler())
 
     httpd = simple_server.make_server(addr, port, api)
@@ -55,7 +55,7 @@ def health(port=9774, addr="0.0.0.0"):
     logging.basicConfig(level=logging.DEBUG)
     LOGGER = logging.getLogger(__name__)
 
-    api = falcon.API()
+    api = falcon.App()
     api.add_route("/health", HealthMetricsHandler())
 
     httpd = simple_server.make_server(addr, port, api)

@@ -31,7 +31,7 @@ jobs:
         uses: FranzDiebold/github-env-vars-action@v2
 
       - name: Fill PHP Version Environment Variable
-        uses: c-py/action-dotenv-to-setenv@v3
+        uses: c-py/action-dotenv-to-setenv@v4
         with:
           env-file: .build.env
 
@@ -42,15 +42,15 @@ jobs:
           VERSION_MAJOR_MINOR_PATCH=${GITHUB_TAG#v}
           VERSION_MAJOR_MINOR=${VERSION_MAJOR_MINOR_PATCH%.*}
           VERSION_MAJOR=${VERSION_MAJOR_MINOR%.*}
-          echo ::set-output name=docker-image-name::${DOCKER_IMAGE_NAME}
-          echo ::set-output name=version-patch::${VERSION_MAJOR_MINOR_PATCH}
-          echo ::set-output name=version-minor::${VERSION_MAJOR_MINOR}
-          echo ::set-output name=version-major::${VERSION_MAJOR}
-          echo ::set-output name=build-date::$(date -u +'%Y-%m-%dT%H:%M:%SZ')
-          echo ::set-output name=github-ci-sha-short::${CI_SHA_SHORT}
-          echo ::set-output name=github-ci-sha::${CI_SHA}
-          echo ::set-output name=github-ci-run-id::${CI_RUN_ID}
-          echo ::set-output name=aws-cli-version::${AWS_CLI_VERSION}
+          echo "docker-image-name=${DOCKER_IMAGE_NAME}" >> $GITHUB_OUTPUT
+          echo "version-patch=${VERSION_MAJOR_MINOR_PATCH}" >> $GITHUB_OUTPUT
+          echo "version-minor=${VERSION_MAJOR_MINOR}" >> $GITHUB_OUTPUT
+          echo "version-major=${VERSION_MAJOR}" >> $GITHUB_OUTPUT
+          echo "build-date=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> $GITHUB_OUTPUT
+          echo "github-ci-sha-short=${CI_SHA_SHORT}" >> $GITHUB_OUTPUT
+          echo "github-ci-sha=${CI_SHA}" >> $GITHUB_OUTPUT
+          echo "github-ci-run-id=${CI_RUN_ID}" >> $GITHUB_OUTPUT
+          echo "aws-cli-version=${AWS_CLI_VERSION}" >> $GITHUB_OUTPUT
 
       - name: Fill Docker Image metadata
         id: meta

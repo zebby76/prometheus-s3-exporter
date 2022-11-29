@@ -26,8 +26,8 @@ jobs:
       - name: Prepare Workflow Environment
         id: prep
         run: |
-          echo ::set-output name=docker-image-name::${DOCKER_IMAGE_NAME}
-          echo ::set-output name=build-date::$(date -u +'%Y-%m-%dT%H:%M:%SZ')
+          echo "docker-image-name=${DOCKER_IMAGE_NAME}" >> $GITHUB_OUTPUT
+          echo "build-date=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> $GITHUB_OUTPUT
 
       - name: Fill Docker Image metadata
         id: meta

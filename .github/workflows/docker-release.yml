@@ -9,7 +9,7 @@ jobs:
 
   init:
 
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-20.04
 
     outputs:
       version-patch: ${{ steps.prep.outputs.version-patch }}
@@ -67,7 +67,7 @@ jobs:
 
   build:
 
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-20.04
     needs: init
     steps:
       - uses: actions/checkout@v3
@@ -109,7 +109,7 @@ jobs:
 
   tests:
 
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-20.04
     needs: [init,build]
     steps:
       - uses: actions/checkout@v3
@@ -152,7 +152,7 @@ jobs:
 
   sign:
 
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-20.04
     needs:  [init,tests]
 
     steps:
@@ -228,7 +228,7 @@ jobs:
 
   cosign:
 
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-20.04
     needs: [init,sign]
 
     steps:
@@ -346,7 +346,7 @@ jobs:
 
   cleanup:
 
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-20.04
     needs: [cosign,sign]
     steps:
       - uses: joutvhu/delete-artifact@v1

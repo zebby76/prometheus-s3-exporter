@@ -99,7 +99,29 @@ jobs:
             AWS_CLI_VERSION_ARG=${{ needs.init.outputs.aws-cli-version }}
           tags: ${{ needs.init.outputs.docker-image-tags }}
           labels: ${{ needs.init.outputs.docker-image-labels }}
-          outputs: type=docker,dest=/tmp/myimage.tar
+          outputs: type=docker,dest=/tmp/builded.tar
+
+      - name: Squash Docker Image
+        id: squash
+        run: |
+          pip install docker-squash
+          cat /tmp/builded.tar | docker load
+          docker-squash --verbose --message "Build and Squashed in GitHub Action" \
+            --tag ${{ needs.init.outputs.docker-image-name }}:${{ needs.init.outputs.github-ci-sha-short }} \
+            --output-path /tmp/squashed.tar \
+            --cleanup \
+            ${{ needs.init.outputs.docker-image-name }}:${{ needs.init.outputs.github-ci-sha-short }}
+          cat /tmp/squashed.tar | docker load         
+          tags=$(echo "${{ needs.init.outputs.docker-image-tags }}" | tr "\n" " ")
+          for tag in $tags; do
+            docker tag ${{ needs.init.outputs.docker-image-name }}:${{ needs.init.outputs.github-ci-sha-short }} $tag
+          done
+          docker save --output /tmp/myimage.tar $tags
+
+      - name: Check Docker Image
+        run: |
+          docker image inspect ${{ needs.init.outputs.docker-image-name }}:${{ needs.init.outputs.github-ci-sha-short }}
+          docker history ${{ needs.init.outputs.docker-image-name }}:${{ needs.init.outputs.github-ci-sha-short }}
 
       - name: Upload artifact
         uses: actions/upload-artifact@v3

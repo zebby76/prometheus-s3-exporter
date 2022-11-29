@@ -258,7 +258,7 @@ jobs:
   cosign:
 
     runs-on: ubuntu-20.04
-    needs: [init,tests]
+    needs: [init,sign]
 
     steps:
 
@@ -376,7 +376,7 @@ jobs:
   cleanup:
 
     runs-on: ubuntu-20.04
-    needs: [init,cosign,sign]
+    needs: [cosign,sign]
     steps:
       - uses: joutvhu/delete-artifact@v1
         with:

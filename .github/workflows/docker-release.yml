@@ -140,7 +140,7 @@ jobs:
           image: ${{ needs.init.outputs.docker-image-name }}:${{ needs.init.outputs.github-ci-sha-short }}
           fail-build: false
           severity-cutoff: critical
-          acs-report-enable: true
+          output-format: table
 
       - name: Test Docker Image
         env:

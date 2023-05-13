@@ -31,7 +31,7 @@ setup(
         "PyYAML==5.4.1",
         "requests==2.27.1",
         "falcon==3.1.0",
-        "boto3==1.24.2",
+        "boto3==1.26.133",
     ],
     entry_points={"console_scripts": ["exporter=exporter:main"]},
 )

@@ -35,7 +35,7 @@ RUN ln -s /opt/bin/apk-list /usr/local/bin/apk-list \
     && ln -s /opt/bin/pip-list /usr/local/bin/pip-list \
     && mkdir -p /opt/bin /opt/src /opt/etc \
     && apt-get -y update \
-    && apt-get -y install --no-install-recommends build-essential dh-autoreconf curl \
+    && apt-get -y install --no-install-recommends build-essential dh-autoreconf curl groff \
     && echo "Add default user ..." \
     && addgroup --gid 1001 default \
     && adduser --system --uid 1001 --gid 1001 --disabled-login --no-create-home default \

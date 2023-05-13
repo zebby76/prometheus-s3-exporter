@@ -1,4 +1,5 @@
-FROM python:3.10-slim-buster
+# syntax=docker/dockerfile:1.3
+FROM python:3.11-slim-buster
 
 ARG AWS_CLI_VERSION_ARG=""
 ARG VERSION_ARG=""

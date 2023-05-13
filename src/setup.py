@@ -2,7 +2,7 @@ from setuptools import setup, find_packages
 
 setup(
     name="prometheus-s3-exporter",
-    version="3.0.0",
+    version="3.0.2",
     description="WebTech Monitoring - Expose S3 bucket size as a Prometheus Metric.",
     url="https://github.com/Smals-Webtech/prometheus-s3-exporter-docker",
     author="Sebastian Molle",
@@ -22,12 +22,13 @@ setup(
         "Programming Language :: Python :: 3.8",
         "Programming Language :: Python :: 3.9",
         "Programming Language :: Python :: 3.10",
+        "Programming Language :: Python :: 3.11",
     ],
     keywords="monitoring prometheus s3",
     packages=find_packages(exclude=["tests"]),
     install_requires=[
         "prometheus-client==0.14.1",
-        "PyYAML==6.0",
+        "PyYAML==5.4.1",
         "requests==2.27.1",
         "falcon==3.1.0",
         "boto3==1.24.2",

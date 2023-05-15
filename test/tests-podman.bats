@@ -1,6 +1,6 @@
 #!/usr/bin/env bats
 load "helpers/tests"
-load "helpers/docker"
+load "helpers/podman"
 
 load "lib/batslib"
 load "lib/output"
@@ -16,15 +16,15 @@ export BATS_S3_DEFAULT_REGION="us-east-1"
 export BATS_DOCKER_IMAGE_NAME="${DOCKER_IMAGE_NAME:-docker.io/smalswebtech/prometheus-s3-exporter:rc}"
 
 @test "[$TEST_FILE] Starting Storage Services (S3)" {
-  command docker-compose -f ${BATS_TEST_DIRNAME%/}/docker-compose.yml up -d minio
-  docker_wait_for_healthy minio 120
+  command podman-compose -f ${BATS_TEST_DIRNAME%/}/docker-compose.yml up -d minio
+  podman_wait_for_healthy minio 120
 }
 
 @test "[$TEST_FILE] Create Storage S3 Bucket." {
 
-  export BATS_S3_ENDPOINT_URL=http://$(docker_ip minio):9000
+  export BATS_S3_ENDPOINT_URL=http://$(podman_ip minio):9000
 
-  run docker run --rm -t --network docker_default \
+  run podman run --rm -t --network docker_default \
                       -e AWS_ACCESS_KEY_ID="${BATS_S3_ACCESS_KEY_ID}" \
                       -e AWS_SECRET_ACCESS_KEY="${BATS_S3_SECRET_ACCESS_KEY}" \
                       -e AWS_DEFAULT_REGION="${BATS_S3_DEFAULT_REGION}" \
@@ -36,9 +36,9 @@ export BATS_DOCKER_IMAGE_NAME="${DOCKER_IMAGE_NAME:-docker.io/smalswebtech/prome
 
 @test "[$TEST_FILE] Loading Test Data files Storage services (S3)" {
 
-  export BATS_S3_ENDPOINT_URL=http://$(docker_ip minio):9000
+  export BATS_S3_ENDPOINT_URL=http://$(podman_ip minio):9000
 
-  run docker run --rm -t --network docker_default \
+  run podman run --rm -t --network docker_default \
                       -e AWS_ACCESS_KEY_ID="${BATS_S3_ACCESS_KEY_ID}" \
                       -e AWS_SECRET_ACCESS_KEY="${BATS_S3_SECRET_ACCESS_KEY}" \
                       -e AWS_DEFAULT_REGION="${BATS_S3_DEFAULT_REGION}" \
@@ -47,7 +47,7 @@ export BATS_DOCKER_IMAGE_NAME="${DOCKER_IMAGE_NAME:-docker.io/smalswebtech/prome
   run mkdir -p /tmp/assets
   run tar xvzf ${BATS_TEST_DIRNAME%/}/assets/example.tar.gz --strip-components=1 -C /tmp/assets
 
-  run docker run --rm -t --network docker_default \
+  run podman run --rm -t --network docker_default \
                       -e AWS_ACCESS_KEY_ID="${BATS_S3_ACCESS_KEY_ID}" \
                       -e AWS_SECRET_ACCESS_KEY="${BATS_S3_SECRET_ACCESS_KEY}" \
                       -e AWS_DEFAULT_REGION="${BATS_S3_DEFAULT_REGION}" \
@@ -59,21 +59,21 @@ export BATS_DOCKER_IMAGE_NAME="${DOCKER_IMAGE_NAME:-docker.io/smalswebtech/prome
 }
 
 @test "[$TEST_FILE] Starting 'WebTech S3 Exporter (Prometheus Exporter)' Service" {
-  export BATS_S3_ENDPOINT_URL=http://$(docker_ip minio):9000
-  command docker-compose -f ${BATS_TEST_DIRNAME%/}/docker-compose.yml up -d exporter
+  export BATS_S3_ENDPOINT_URL=http://$(podman_ip minio):9000
+  command podman-compose -f ${BATS_TEST_DIRNAME%/}/docker-compose.yml up -d exporter
 }
 
 @test "[$TEST_FILE] Test 'WebTech S3 Exporter (Prometheus Exporter)' /health" {
-  retry 12 5 curl_container exporter :9774/health -s -w %{http_code} -o /dev/null
+  retry 12 5 curl_podman_container exporter :9774/health -s -w %{http_code} -o /dev/null
   assert_output -l 0 $'200'
-  retry 12 5 curl_container exporter :9774/health -s
+  retry 12 5 curl_podman_container exporter :9774/health -s
   assert_output -l "{\"status\": true}"
 }
 
 @test "[$TEST_FILE] Test 'WebTech S3 Exporter (Prometheus Exporter)' /metrics" {
-  retry 12 5 curl_container exporter :9773/metrics -s -w %{http_code} -o /dev/null
+  retry 12 5 curl_podman_container exporter :9773/metrics -s -w %{http_code} -o /dev/null
   assert_output -l 0 $'200'
-  retry 12 5 curl_container exporter :9773/metrics -s
+  retry 12 5 curl_podman_container exporter :9773/metrics -s
   assert_output -l "webtech_s3_exporter_up 1.0"
   assert_output -l "webtech_s3_exporter_status{name=\"${BATS_S3_BUCKET_NAME}\",namespace=\"${BATS_OPENSHIFT_NAMESPACE}\"} 1.0"
   assert_output -l "webtech_s3_bucket_count_total{name=\"${BATS_S3_BUCKET_NAME}\",namespace=\"${BATS_OPENSHIFT_NAMESPACE}\"} 5.0"
@@ -81,7 +81,7 @@ export BATS_DOCKER_IMAGE_NAME="${DOCKER_IMAGE_NAME:-docker.io/smalswebtech/prome
 
 @test "[$TEST_FILE] Test 'WebTech S3 Exporter (Prometheus Exporter)' aws cli" {
 
-  run docker run --rm -t \
+  run podman run --rm -t \
                       -e OPENSHIFT_NODE_HOSTNAME="node1.openshift.cloud.vm" \
                       -e OPENSHIFT_NAMESPACE="${BATS_OPENSHIFT_NAMESPACE}" \
                       -e AWS_ACCESS_KEY_ID="${BATS_S3_ACCESS_KEY_ID}" \
@@ -97,6 +97,5 @@ export BATS_DOCKER_IMAGE_NAME="${DOCKER_IMAGE_NAME:-docker.io/smalswebtech/prome
 }
 
 @test "[$TEST_FILE] Stop all and delete test containers" {
-  command docker-compose -f ${BATS_TEST_DIRNAME%/}/docker-compose.yml stop
-  command docker-compose -f ${BATS_TEST_DIRNAME%/}/docker-compose.yml rm -v -f
+  command podman-compose -f ${BATS_TEST_DIRNAME%/}/docker-compose.yml down -v
 }

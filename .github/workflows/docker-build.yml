@@ -29,7 +29,7 @@ jobs:
           echo "docker-image-name=${DOCKER_IMAGE_NAME}" >> $GITHUB_OUTPUT
           echo "build-date=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> $GITHUB_OUTPUT
 
-      - name: Fill Docker Image metadata
+      - name: Fill "${{ steps.prep.outputs.docker-image-name }}" Docker Image metadata
         id: meta
         uses: docker/metadata-action@v4
         with:
@@ -50,9 +50,9 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-buildx-
 
-      - name: Build Docker Image
+      - name: Build "${{ steps.prep.outputs.docker-image-name }}" Docker Image
         id: build
-        uses: docker/build-push-action@v3
+        uses: docker/build-push-action@v4
         with:
           builder: ${{ steps.buildx.outputs.name }}
           context: .
@@ -67,18 +67,11 @@ jobs:
           load: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          outputs: type=docker,dest=/tmp/myimage.tar
+          outputs: type=docker,dest=/tmp/image.tar
 
-      - name: Squash Docker Image
-        id: squash
+      - name: Load Docker Image
         run: |
-          pip install docker-squash
-          cat /tmp/myimage.tar | docker load
-          docker-squash --verbose --message "Build and Squashed in GitHub Action" \
-            --tag ${{ steps.prep.outputs.docker-image-name }}:rc \
-            --output-path /tmp/myimage.tar \
-            ${{ steps.prep.outputs.docker-image-name }}:rc
-          cat /tmp/myimage.tar | docker load
+          docker load --input /tmp/image.tar
 
       - name: Check Docker Image
         run: |

@@ -83,7 +83,7 @@ jobs:
             type=raw,value=${{ needs.init.outputs.version-major }}
             type=raw,value=latest
 
-      - name: Build "${{ needs.init.outputs.docker-image-name }}:${{ needs.init.outputs.github-ci-sha-short }}-${{ matrix.image-variant }}" Docker Image
+      - name: Build "${{ needs.init.outputs.docker-image-name }}:${{ needs.init.outputs.github-ci-sha-short }}" Docker Image
         id: build
         uses: docker/build-push-action@v4
         with:
@@ -100,7 +100,7 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           outputs: type=docker,dest=/tmp/builded.tar
 
-      - name: Upload "${{ needs.init.outputs.docker-image-name }}:${{ needs.init.outputs.github-ci-sha-short }}-${{ matrix.image-variant }}" Docker image artifact
+      - name: Upload "${{ needs.init.outputs.docker-image-name }}:${{ needs.init.outputs.github-ci-sha-short }}" Docker image artifact
         uses: actions/upload-artifact@v3
         with:
           name: myimage

@@ -4,9 +4,6 @@ services:
   minio:
     image: docker.io/minio/minio:latest
     container_name: minio
-    ports:
-      - 9000:9000
-      - 9001:9001
     environment:
       - MINIO_ROOT_USER=${BATS_S3_ACCESS_KEY_ID}
       - MINIO_ROOT_PASSWORD=${BATS_S3_SECRET_ACCESS_KEY}
@@ -31,8 +28,6 @@ services:
       - AWS_DEFAULT_REGION=${BATS_S3_DEFAULT_REGION}
       - AWS_ENDPOINT_URL=${BATS_S3_ENDPOINT_URL}
       - S3_BUCKET_NAME=${BATS_S3_BUCKET_NAME}
-    ports:
-      - 9773:9773
     networks:
       - default
     mem_limit: 64m

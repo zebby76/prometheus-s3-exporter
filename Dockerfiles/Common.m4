@@ -1,12 +1,3 @@
-# syntax=docker/dockerfile:1.3
-FROM python:3.11-slim-buster
-
-ARG AWS_CLI_VERSION_ARG=""
-ARG VERSION_ARG=""
-ARG RELEASE_ARG=""
-ARG BUILD_DATE_ARG=""
-ARG VCS_REF_ARG=""
-
 LABEL be.smals.webtech.monitoring.build-date=$BUILD_DATE_ARG \
       be.smals.webtech.monitoring.name="WebTech Monitoring Prometheus S3 Exporter" \
       be.smals.webtech.monitoring.description="Expose S3 bucket sizes as Prometheus Metrics." \

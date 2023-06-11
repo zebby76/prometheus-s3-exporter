@@ -1,0 +1,5 @@
+# syntax=docker/dockerfile:1.3
+FROM python:3.11-slim-buster as prd
+
+# include(Args.m4)
+# include(Common.m4)

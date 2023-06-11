@@ -10,6 +10,10 @@ jobs:
 
   build-docker-images:
 
+    strategy:
+      matrix:
+        image-variant: [prd]
+
     runs-on: ubuntu-20.04
 
     steps:
@@ -36,7 +40,7 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           images: "${{ steps.prep.outputs.docker-image-name }}"
           tags: |
-            type=raw,value=rc
+            type=raw,value=rc-${{ matrix.image-variant }}
 
       - name: Set up Docker Buildx
         id: buildx
@@ -50,6 +54,10 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-buildx-
 
+      - name: Create Dockerfile
+        run: |
+          make Dockerfile
+
       - name: Build "${{ steps.prep.outputs.docker-image-name }}" Docker Image
         id: build
         uses: docker/build-push-action@v4
@@ -57,8 +65,9 @@ jobs:
           builder: ${{ steps.buildx.outputs.name }}
           context: .
           file: Dockerfile
+          target: ${{ matrix.image-variant }}
           build-args: |
-            VERSION_ARG=rc
+            VERSION_ARG=${{ env.EXPORTER_VERSION }}
             RELEASE_ARG=${{ env.CI_RUN_ID }}
             VCS_REF_ARG=${{ env.CI_SHA }}
             BUILD_DATE_ARG=${{ steps.prep.outputs.build-date }}
@@ -75,5 +84,5 @@ jobs:
 
       - name: Check Docker Image
         run: |
-          docker image inspect ${{ steps.prep.outputs.docker-image-name }}:rc
-          docker history ${{ steps.prep.outputs.docker-image-name }}:rc
+          docker image inspect ${{ steps.prep.outputs.docker-image-name }}:rc-${{ matrix.image-variant }}
+          docker history ${{ steps.prep.outputs.docker-image-name }}:rc-${{ matrix.image-variant }}

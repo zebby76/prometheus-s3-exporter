@@ -1,6 +1,6 @@
 #!/usr/bin/env bats
 load "helpers/tests"
-load "helpers/docker"
+load "helpers/containers"
 
 load "lib/batslib"
 load "lib/output"
@@ -13,22 +13,26 @@ export BATS_S3_ACCESS_KEY_ID="mock"
 export BATS_S3_SECRET_ACCESS_KEY="SecretAccessKey"
 export BATS_S3_DEFAULT_REGION="us-east-1"
 
+export BATS_CONTAINER_ENGINE="${CONTAINER_ENGINE:-podman}"
+export BATS_CONTAINER_COMPOSE_ENGINE="${BATS_CONTAINER_ENGINE}-compose"
+export BATS_CONTAINER_NETWORK_NAME="${CONTAINER_NETWORK_NAME:-docker_default}"
+
 export BATS_DOCKER_IMAGE_NAME="${DOCKER_IMAGE_NAME:-docker.io/smalswebtech/prometheus-s3-exporter:rc}"
 
 @test "[$TEST_FILE] Starting Storage Services (S3)" {
-  command docker-compose -f ${BATS_TEST_DIRNAME%/}/docker-compose.yml up -d minio
-  docker_wait_for_healthy minio 120
+  command ${BATS_CONTAINER_COMPOSE_ENGINE} -f ${BATS_TEST_DIRNAME%/}/docker-compose.yml up -d minio
+  container_wait_for_healthy minio 120
 }
 
 @test "[$TEST_FILE] Create Storage S3 Bucket." {
 
-  export BATS_S3_ENDPOINT_URL=http://$(docker_ip minio):9000
+  export BATS_S3_ENDPOINT_URL=http://$(container_ip minio):9000
 
-  run docker run --rm -t --network docker_default \
+  run ${BATS_CONTAINER_ENGINE} run --rm -t --network ${BATS_CONTAINER_NETWORK_NAME} \
                       -e AWS_ACCESS_KEY_ID="${BATS_S3_ACCESS_KEY_ID}" \
                       -e AWS_SECRET_ACCESS_KEY="${BATS_S3_SECRET_ACCESS_KEY}" \
                       -e AWS_DEFAULT_REGION="${BATS_S3_DEFAULT_REGION}" \
-      docker.io/amazon/aws-cli s3 mb s3://${BATS_S3_BUCKET_NAME%/} --endpoint-url ${BATS_S3_ENDPOINT_URL}
+      docker.io/amazon/aws-cli:2.11.22 s3 mb s3://${BATS_S3_BUCKET_NAME%/} --endpoint-url ${BATS_S3_ENDPOINT_URL}
 
   assert_output -l -r "make_bucket: ${BATS_S3_BUCKET_NAME%%/*}"
 
@@ -36,31 +40,31 @@ export BATS_DOCKER_IMAGE_NAME="${DOCKER_IMAGE_NAME:-docker.io/smalswebtech/prome
 
 @test "[$TEST_FILE] Loading Test Data files Storage services (S3)" {
 
-  export BATS_S3_ENDPOINT_URL=http://$(docker_ip minio):9000
+  export BATS_S3_ENDPOINT_URL=http://$(container_ip minio):9000
 
-  run docker run --rm -t --network docker_default \
+  run ${BATS_CONTAINER_ENGINE} run --rm -t --network ${BATS_CONTAINER_NETWORK_NAME} \
                       -e AWS_ACCESS_KEY_ID="${BATS_S3_ACCESS_KEY_ID}" \
                       -e AWS_SECRET_ACCESS_KEY="${BATS_S3_SECRET_ACCESS_KEY}" \
                       -e AWS_DEFAULT_REGION="${BATS_S3_DEFAULT_REGION}" \
-      docker.io/amazon/aws-cli s3 put-bucket-acl --bucket s3://${BATS_S3_BUCKET_NAME%/} --acl public-read --endpoint-url ${BATS_S3_ENDPOINT_URL}
+      docker.io/amazon/aws-cli:2.11.22 s3 put-bucket-acl --bucket s3://${BATS_S3_BUCKET_NAME%/} --acl public-read --endpoint-url ${BATS_S3_ENDPOINT_URL}
 
   run mkdir -p /tmp/assets
   run tar xvzf ${BATS_TEST_DIRNAME%/}/assets/example.tar.gz --strip-components=1 -C /tmp/assets
 
-  run docker run --rm -t --network docker_default \
+  run ${BATS_CONTAINER_ENGINE} run --rm -t --network ${BATS_CONTAINER_NETWORK_NAME} \
                       -e AWS_ACCESS_KEY_ID="${BATS_S3_ACCESS_KEY_ID}" \
                       -e AWS_SECRET_ACCESS_KEY="${BATS_S3_SECRET_ACCESS_KEY}" \
                       -e AWS_DEFAULT_REGION="${BATS_S3_DEFAULT_REGION}" \
                       -v /tmp/assets:/tmp/assets:ro \
-      docker.io/amazon/aws-cli s3 sync /tmp/assets s3://${BATS_S3_BUCKET_NAME%/}/assets --endpoint-url ${BATS_S3_ENDPOINT_URL}
+      docker.io/amazon/aws-cli:2.11.22 s3 sync /tmp/assets s3://${BATS_S3_BUCKET_NAME%/}/assets --endpoint-url ${BATS_S3_ENDPOINT_URL}
 
   assert_output -l -r ".*upload: .* to s3://${BATS_S3_BUCKET_NAME%/}.*"
 
 }
 
 @test "[$TEST_FILE] Starting 'WebTech S3 Exporter (Prometheus Exporter)' Service" {
-  export BATS_S3_ENDPOINT_URL=http://$(docker_ip minio):9000
-  command docker-compose -f ${BATS_TEST_DIRNAME%/}/docker-compose.yml up -d exporter
+  export BATS_S3_ENDPOINT_URL=http://$(container_ip minio):9000
+  command ${BATS_CONTAINER_COMPOSE_ENGINE} -f ${BATS_TEST_DIRNAME%/}/docker-compose.yml up -d exporter
 }
 
 @test "[$TEST_FILE] Test 'WebTech S3 Exporter (Prometheus Exporter)' /health" {
@@ -81,7 +85,7 @@ export BATS_DOCKER_IMAGE_NAME="${DOCKER_IMAGE_NAME:-docker.io/smalswebtech/prome
 
 @test "[$TEST_FILE] Test 'WebTech S3 Exporter (Prometheus Exporter)' aws cli" {
 
-  run docker run --rm -t \
+  run ${BATS_CONTAINER_ENGINE} run --rm -t \
                       -e OPENSHIFT_NODE_HOSTNAME="node1.openshift.cloud.vm" \
                       -e OPENSHIFT_NAMESPACE="${BATS_OPENSHIFT_NAMESPACE}" \
                       -e AWS_ACCESS_KEY_ID="${BATS_S3_ACCESS_KEY_ID}" \
@@ -97,6 +101,5 @@ export BATS_DOCKER_IMAGE_NAME="${DOCKER_IMAGE_NAME:-docker.io/smalswebtech/prome
 }
 
 @test "[$TEST_FILE] Stop all and delete test containers" {
-  command docker-compose -f ${BATS_TEST_DIRNAME%/}/docker-compose.yml stop
-  command docker-compose -f ${BATS_TEST_DIRNAME%/}/docker-compose.yml rm -v -f
+  command ${BATS_CONTAINER_COMPOSE_ENGINE} -f ${BATS_TEST_DIRNAME%/}/docker-compose.yml down -v
 }

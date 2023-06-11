@@ -53,6 +53,10 @@ jobs:
 
   build:
 
+    strategy:
+      matrix:
+        image-variant: [prd]
+
     runs-on: ubuntu-20.04
     needs: init
     steps:
@@ -77,19 +81,23 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           images: "${{ needs.init.outputs.docker-image-name }}"
           tags: |
-            type=raw,value=${{ needs.init.outputs.github-ci-sha-short }}
-            type=raw,value=${{ needs.init.outputs.version-patch }}
-            type=raw,value=${{ needs.init.outputs.version-minor }}
-            type=raw,value=${{ needs.init.outputs.version-major }}
-            type=raw,value=latest
+            type=raw,value=${{ needs.init.outputs.github-ci-sha-short }}-${{ matrix.image-variant }}
+            type=raw,value=${{ needs.init.outputs.version-patch }}-${{ matrix.image-variant }}
+            type=raw,value=${{ needs.init.outputs.version-minor }}-${{ matrix.image-variant }}
+            type=raw,value=${{ needs.init.outputs.version-major }}-${{ matrix.image-variant }}
 
-      - name: Build "${{ needs.init.outputs.docker-image-name }}:${{ needs.init.outputs.github-ci-sha-short }}" Docker Image
+      - name: Create Dockerfile
+        run: |
+          make Dockerfile
+
+      - name: Build "${{ needs.init.outputs.docker-image-name }}:${{ needs.init.outputs.github-ci-sha-short }}-${{ matrix.image-variant }}" Docker Image
         id: build
         uses: docker/build-push-action@v4
         with:
           builder: ${{ steps.buildx.outputs.name }}
           context: .
           file: Dockerfile
+          target: ${{ matrix.image-variant }}
           build-args: |
             VERSION_ARG=${{ needs.init.outputs.version-patch }}
             RELEASE_ARG=${{ needs.init.outputs.github-ci-run-id }}
@@ -100,13 +108,17 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           outputs: type=docker,dest=/tmp/builded.tar
 
-      - name: Upload "${{ needs.init.outputs.docker-image-name }}:${{ needs.init.outputs.github-ci-sha-short }}" Docker image artifact
+      - name: Upload "${{ needs.init.outputs.docker-image-name }}:${{ needs.init.outputs.github-ci-sha-short }}-${{ matrix.image-variant }}" Docker image artifact
         uses: actions/upload-artifact@v3
         with:
-          name: myimage
+          name: ${{ matrix.image-variant }}
           path: /tmp/builded.tar
 
   tests:
+
+    strategy:
+      matrix:
+        image-variant: [prd]
 
     runs-on: ubuntu-20.04
     needs: [init,build]
@@ -121,10 +133,10 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v2
 
-      - name: Download "${{ needs.init.outputs.docker-image-name }}:${{ needs.init.outputs.github-ci-sha-short }}" Docker image artifact
+      - name: Download "${{ needs.init.outputs.docker-image-name }}:${{ needs.init.outputs.github-ci-sha-short }}-${{ matrix.image-variant }}" Docker image artifact
         uses: actions/download-artifact@v3
         with:
-          name: myimage
+          name: ${{ matrix.image-variant }}
           path: /tmp
 
       - name: Load Docker image
@@ -132,11 +144,11 @@ jobs:
           docker load --input /tmp/builded.tar
           docker image ls -a
 
-      - name: Scan "${{ needs.init.outputs.docker-image-name }}:${{ needs.init.outputs.github-ci-sha-short }}" Docker image
+      - name: Scan "${{ needs.init.outputs.docker-image-name }}:${{ needs.init.outputs.github-ci-sha-short }}-${{ matrix.image-variant }}" Docker image
         uses: anchore/scan-action@v3
         id: scan
         with:
-          image: ${{ needs.init.outputs.docker-image-name }}:${{ needs.init.outputs.github-ci-sha-short }}
+          image: ${{ needs.init.outputs.docker-image-name }}:${{ needs.init.outputs.github-ci-sha-short }}-${{ matrix.image-variant }}
           fail-build: false
           severity-cutoff: critical
           output-format: table
@@ -148,15 +160,28 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_PASSWORD }}
 
-      - name: Test "${{ needs.init.outputs.docker-image-name }}:${{ needs.init.outputs.github-ci-sha-short }}" Docker Image
+      - name: Prepare Test Environment
+        id: prep-test
+        run: |
+          echo "image-flavor=${IMAGE_VARIANT%-*}" >> $GITHUB_OUTPUT
         env:
-          DOCKER_IMAGE_NAME: ${{ needs.init.outputs.docker-image-name }}:${{ needs.init.outputs.github-ci-sha-short }}
+          IMAGE_VARIANT: ${{ matrix.image-variant }}
+
+      - name: Test "${{ needs.init.outputs.docker-image-name }}:${{ needs.init.outputs.github-ci-sha-short }}-${{ matrix.image-variant }}" Docker Image
+        env:
+          DOCKER_IMAGE_NAME: ${{ needs.init.outputs.docker-image-name }}:${{ needs.init.outputs.github-ci-sha-short }}-${{ matrix.image-variant }}
+          CONTAINER_ENGINE: docker
         run: |
           docker network create docker_default
-          docker pull appropriate/curl:latest
+          docker pull docker.io/curlimages/curl:8.1.2
           bats -r test/tests.bats
 
-  sign:
+  sign-prd:
+
+    strategy:
+      max-parallel: 1
+      matrix:
+        image-variant: [prd]
 
     runs-on: ubuntu-20.04
     needs:  [init,tests]
@@ -166,10 +191,10 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v2
 
-      - name: Download "${{ needs.init.outputs.docker-image-name }}:${{ needs.init.outputs.github-ci-sha-short }}" Docker image artifact
+      - name: Download "${{ needs.init.outputs.docker-image-name }}:${{ needs.init.outputs.github-ci-sha-short }}-${{ matrix.image-variant }}" Docker image artifact
         uses: actions/download-artifact@v3
         with:
-          name: myimage
+          name: ${{ matrix.image-variant }}
           path: /tmp
 
       - name: Load Docker image
@@ -184,10 +209,40 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_PASSWORD }}
 
+      - name: Tag docker image "${{ needs.init.outputs.docker-image-name }}:${{ needs.init.outputs.github-ci-sha-short }}-${{ matrix.image-variant }} for release"
+        id: prep-sign-tagging
+        run: |
+          docker tag ${{ needs.init.outputs.docker-image-name }}:${{ needs.init.outputs.github-ci-sha-short }}-${{ matrix.image-variant }} \
+                     ${{ needs.init.outputs.docker-image-name }}:${{ needs.init.outputs.github-ci-sha-short }}
+          docker tag ${{ needs.init.outputs.docker-image-name }}:${{ needs.init.outputs.version-patch }}-${{ matrix.image-variant }} \
+                     ${{ needs.init.outputs.docker-image-name }}:${{ needs.init.outputs.version-patch }}
+          docker tag ${{ needs.init.outputs.docker-image-name }}:${{ needs.init.outputs.version-minor }}-${{ matrix.image-variant }} \
+                     ${{ needs.init.outputs.docker-image-name }}:${{ needs.init.outputs.version-minor }}
+          docker tag ${{ needs.init.outputs.docker-image-name }}:${{ needs.init.outputs.version-major }}-${{ matrix.image-variant }} \
+                     ${{ needs.init.outputs.docker-image-name }}:${{ needs.init.outputs.version-major }}
+          docker tag ${{ needs.init.outputs.docker-image-name }}:${{ needs.init.outputs.version-major }}-${{ matrix.image-variant }} \
+                     ${{ needs.init.outputs.docker-image-name }}:latest
+
+      - name: Sign and push docker image "${{ needs.init.outputs.docker-image-name }}:${{ needs.init.outputs.github-ci-sha-short }}-${{ matrix.image-variant }}"
+        uses: sudo-bot/action-docker-sign@latest
+        with:
+          image-ref: "${{ needs.init.outputs.docker-image-name }}:${{ needs.init.outputs.github-ci-sha-short }}-${{ matrix.image-variant }}"
+          private-key-id: "${{ secrets.DOCKER_PRIVATE_KEY_ID }}"
+          private-key: ${{ secrets.DOCKER_PRIVATE_KEY }}
+          private-key-passphrase: ${{ secrets.DOCKER_PRIVATE_KEY_PASSPHRASE }}
+
       - name: Sign and push docker image "${{ needs.init.outputs.docker-image-name }}:${{ needs.init.outputs.github-ci-sha-short }}"
         uses: sudo-bot/action-docker-sign@latest
         with:
           image-ref: "${{ needs.init.outputs.docker-image-name }}:${{ needs.init.outputs.github-ci-sha-short }}"
+          private-key-id: "${{ secrets.DOCKER_PRIVATE_KEY_ID }}"
+          private-key: ${{ secrets.DOCKER_PRIVATE_KEY }}
+          private-key-passphrase: ${{ secrets.DOCKER_PRIVATE_KEY_PASSPHRASE }}
+
+      - name: Sign and push docker image "${{ needs.init.outputs.docker-image-name }}:${{ needs.init.outputs.version-patch }}-${{ matrix.image-variant }}"
+        uses: sudo-bot/action-docker-sign@latest
+        with:
+          image-ref: "${{ needs.init.outputs.docker-image-name }}:${{ needs.init.outputs.version-patch }}-${{ matrix.image-variant }}"
           private-key-id: "${{ secrets.DOCKER_PRIVATE_KEY_ID }}"
           private-key: ${{ secrets.DOCKER_PRIVATE_KEY }}
           private-key-passphrase: ${{ secrets.DOCKER_PRIVATE_KEY_PASSPHRASE }}
@@ -200,10 +255,26 @@ jobs:
           private-key: ${{ secrets.DOCKER_PRIVATE_KEY }}
           private-key-passphrase: ${{ secrets.DOCKER_PRIVATE_KEY_PASSPHRASE }}
 
+      - name: Sign and push docker image "${{ needs.init.outputs.docker-image-name }}:${{ needs.init.outputs.version-minor }}-${{ matrix.image-variant }}"
+        uses: sudo-bot/action-docker-sign@latest
+        with:
+          image-ref: "${{ needs.init.outputs.docker-image-name }}:${{ needs.init.outputs.version-minor }}-${{ matrix.image-variant }}"
+          private-key-id: "${{ secrets.DOCKER_PRIVATE_KEY_ID }}"
+          private-key: ${{ secrets.DOCKER_PRIVATE_KEY }}
+          private-key-passphrase: ${{ secrets.DOCKER_PRIVATE_KEY_PASSPHRASE }}
+
       - name: Sign and push docker image "${{ needs.init.outputs.docker-image-name }}:${{ needs.init.outputs.version-minor }}"
         uses: sudo-bot/action-docker-sign@latest
         with:
           image-ref: "${{ needs.init.outputs.docker-image-name }}:${{ needs.init.outputs.version-minor }}"
+          private-key-id: "${{ secrets.DOCKER_PRIVATE_KEY_ID }}"
+          private-key: ${{ secrets.DOCKER_PRIVATE_KEY }}
+          private-key-passphrase: ${{ secrets.DOCKER_PRIVATE_KEY_PASSPHRASE }}
+
+      - name: Sign and push docker image "${{ needs.init.outputs.docker-image-name }}:${{ needs.init.outputs.version-major }}-${{ matrix.image-variant }}"
+        uses: sudo-bot/action-docker-sign@latest
+        with:
+          image-ref: "${{ needs.init.outputs.docker-image-name }}:${{ needs.init.outputs.version-major }}-${{ matrix.image-variant }}"
           private-key-id: "${{ secrets.DOCKER_PRIVATE_KEY_ID }}"
           private-key: ${{ secrets.DOCKER_PRIVATE_KEY }}
           private-key-passphrase: ${{ secrets.DOCKER_PRIVATE_KEY_PASSPHRASE }}
@@ -226,18 +297,26 @@ jobs:
 
       - name: Check Docker Images pull's
         run: |
+          docker pull ${{ needs.init.outputs.docker-image-name }}:${{ needs.init.outputs.github-ci-sha-short }}-${{ matrix.image-variant }}
           docker pull ${{ needs.init.outputs.docker-image-name }}:${{ needs.init.outputs.github-ci-sha-short }}
+          docker pull ${{ needs.init.outputs.docker-image-name }}:${{ needs.init.outputs.version-patch }}-${{ matrix.image-variant }}
           docker pull ${{ needs.init.outputs.docker-image-name }}:${{ needs.init.outputs.version-patch }}
+          docker pull ${{ needs.init.outputs.docker-image-name }}:${{ needs.init.outputs.version-minor }}-${{ matrix.image-variant }}
           docker pull ${{ needs.init.outputs.docker-image-name }}:${{ needs.init.outputs.version-minor }}
+          docker pull ${{ needs.init.outputs.docker-image-name }}:${{ needs.init.outputs.version-major }}-${{ matrix.image-variant }}
           docker pull ${{ needs.init.outputs.docker-image-name }}:${{ needs.init.outputs.version-major }}
           docker pull ${{ needs.init.outputs.docker-image-name }}:latest
 
   cleanup:
 
+    strategy:
+      matrix:
+        image-variant: [prd]
+
     runs-on: ubuntu-20.04
-    needs: [sign]
+    needs: [sign-prd]
     steps:
       - uses: joutvhu/delete-artifact@v1
         with:
           name: |
-            myimage
+            ${{ matrix.image-variant }}

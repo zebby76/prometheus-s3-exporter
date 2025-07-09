@@ -1,0 +1,6 @@
+---
+services:
+  exporter:
+    build:
+      context: .
+      target: prd

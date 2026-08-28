@@ -22,7 +22,7 @@ setup(
         "Programming Language :: Python :: 3.12",
     ],
     keywords="monitoring prometheus s3",
-    packages=find_packages(exclude=["tests"]),
+    packages=find_packages(exclude=["test", "test.*"]),
     install_requires=[
         "PyYAML==6.0.2",
         "prometheus-client==0.22.1",
@@ -30,6 +30,7 @@ setup(
         "falcon==4.0.2",
         "boto3==1.39.3",
     ],
+    extras_require={"dev": ["pytest==8.3.4"]},
     entry_points={"console_scripts": ["exporter=exporter:main"]},
     python_requires=">=3.12, <3.13",
 )

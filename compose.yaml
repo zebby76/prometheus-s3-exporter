@@ -4,21 +4,30 @@ services:
     image: docker.io/smalswebtech/prometheus-s3-exporter
     restart: unless-stopped
     environment:
-      - OPENSHIFT_NODE_HOSTNAME=node1.openshift.cloud.vm
       - OPENSHIFT_NAMESPACE=default-namespace
       - AWS_ACCESS_KEY_ID=minioadmin
       - AWS_SECRET_ACCESS_KEY=minioadmin
       - AWS_DEFAULT_REGION=us-east-1
       - AWS_ENDPOINT_URL=http://minio:9000
       - S3_BUCKET_NAME=my-bucket
-    user: "1002:0"
+    user: "1001:0"
     ports:
       - 9773:9773/tcp
       - 9774:9774/tcp
     volumes:
       - ./config/collector.yml:/app/config/collector.yml
+    depends_on:
+      minio:
+        condition: service_healthy
     healthcheck:
-      test: ["CMD", "curl", "--fail", "http://localhost:9734/health"]
+      test:
+        - CMD-SHELL
+        - python3 -c "import urllib.request as u;
+          u.urlopen('http://localhost:9774/health', timeout=4)"
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 5s
     mem_limit: 64m
 
   minio:
@@ -27,14 +36,17 @@ services:
     environment:
       - MINIO_ROOT_USER=minioadmin
       - MINIO_ROOT_PASSWORD=minioadmin
+      # Lets the `minio` usage source be tried by hand against this stack; the
+      # endpoint answers 403 without it. Dev fixture only.
+      - MINIO_PROMETHEUS_AUTH_TYPE=public
     volumes:
       - minio-data:/data
     command: server /data --console-address ":9001"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
-      interval: 30s
-      timeout: 20s
-      retries: 3
+      interval: 5s
+      timeout: 5s
+      retries: 12
     mem_limit: 512m
 
 volumes:

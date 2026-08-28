@@ -4,31 +4,40 @@ services:
     build:
       context: .
       target: dev
+    environment:
+      # Keeps the smoke test's outage-and-recovery path down to seconds; the
+      # shipped default is 60. Override from the shell to try other values,
+      # including 0 to switch the probe off.
+      - COLLECTOR_CONNECTIVITY_INTERVAL=${COLLECTOR_CONNECTIVITY_INTERVAL:-5}
+    # Gate on the fixtures being in place: `up --wait` then means the bucket is
+    # already populated, so the smoke test can assert on exact figures instead
+    # of racing the uploads.
+    depends_on:
+      minio:
+        condition: service_healthy
+      minio-init-content:
+        condition: service_completed_successfully
 
   minio-init-bucket:
     image: docker.io/minio/mc:latest
     depends_on:
-      - minio
+      minio:
+        condition: service_healthy
     entrypoint: >
       /bin/sh -c "
-        sleep 5;
-        mc alias set local http://minio:9000 minioadmin minioadmin;
-        mc mb -p local/my-bucket;
-        mc policy set public local/my-bucket;
-        exit 0;
+        mc alias set local http://minio:9000 minioadmin minioadmin &&
+        mc mb -p local/my-bucket
       "
 
   minio-init-content:
-    image: minio/mc:latest
+    image: docker.io/minio/mc:latest
     depends_on:
-      - minio
-      - minio-init-bucket
+      minio-init-bucket:
+        condition: service_completed_successfully
     volumes:
       - ./test/assets:/data-to-upload:ro
     entrypoint: >
       /bin/sh -c "
-        sleep 10;
-        mc alias set local http://minio:9000 minioadmin minioadmin;
-        mc cp --recursive /data-to-upload local/my-bucket/;
-        exit 0;
+        mc alias set local http://minio:9000 minioadmin minioadmin &&
+        mc cp --recursive /data-to-upload/ local/my-bucket/
       "

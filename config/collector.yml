@@ -1,3 +1,41 @@
+---
 kind: PrometheusExporterConfig
 configuration:
-  - interval: 1 # (minutes)
+  # Minutes between two collections.
+  - interval: 1
+
+  # Where the usage figures come from.
+  #   auto        detect at startup: storagegrid, minio, cloudwatch, then list
+  #   storagegrid GET /<bucket>?x-ntap-sg-usage  (1 request, S3 credentials)
+  #   minio       MinIO Prometheus endpoint      (1 request, needs sources.minio)
+  #   cloudwatch  AWS/S3 daily storage metrics   (1 request, needs sources.cloudwatch)
+  #   list        ListObjectsV2                  (1 request per 1000 objects)
+  # Overridable at runtime with the COLLECTOR_SOURCE environment variable.
+  - source: auto
+
+  # Consecutive collection failures before the source is detected again.
+  - max_failures: 3
+
+  # Seconds between two bucket reachability probes, on their own thread and
+  # their own clock. One cheap request each, so this can stay frequent even
+  # when `interval` is measured in hours. 0 disables the probe and /ready.
+  # Overridable with COLLECTOR_CONNECTIVITY_INTERVAL.
+  - connectivity_interval: 60
+
+  # Seconds before retrying a failed collection, capped at `interval`. Without
+  # it, one transient failure at a 60 minute interval leaves the figures stale
+  # for a full hour.
+  - retry_interval: 300
+
+  # Per-source settings. minio and cloudwatch stay inactive until configured,
+  # because both need credentials beyond the S3 key pair the exporter uses.
+  - sources:
+      # minio:
+      #   # Answers 403 unless the operator sets MINIO_PROMETHEUS_AUTH_TYPE=public
+      #   # or you supply a JWT minted from admin credentials.
+      #   metrics_url: http://minio:9000/minio/v2/metrics/bucket
+      #   bearer_token_file: /run/secrets/minio-metrics-token
+      # cloudwatch:
+      #   # Requires cloudwatch:GetMetricStatistics in the IAM policy.
+      #   region: eu-west-1
+      #   storage_type: StandardStorage

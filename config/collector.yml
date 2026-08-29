@@ -5,10 +5,11 @@ configuration:
   - interval: 1
 
   # Where the usage figures come from.
-  #   auto        detect at startup: storagegrid, minio, cloudwatch, then list
+  #   auto        detect at startup: storagegrid, minio, cloudwatch, r2, then list
   #   storagegrid GET /<bucket>?x-ntap-sg-usage  (1 request, S3 credentials)
   #   minio       MinIO Prometheus endpoint      (1 request, needs sources.minio)
   #   cloudwatch  AWS/S3 daily storage metrics   (1 request, needs sources.cloudwatch)
+  #   r2          Cloudflare R2 account API      (1 request, needs sources.r2)
   #   list        ListObjectsV2                  (1 request per 1000 objects)
   # Overridable at runtime with the COLLECTOR_SOURCE environment variable.
   - source: auto
@@ -39,3 +40,13 @@ configuration:
       #   # Requires cloudwatch:GetMetricStatistics in the IAM policy.
       #   region: eu-west-1
       #   storage_type: StandardStorage
+      # r2:
+      #   # Cloudflare's account API, NOT the S3 endpoint: it needs an API token
+      #   # with `Workers R2 Storage: Read`, which an S3 key pair cannot replace.
+      #   # Both settings also read the environment (CF_ACCOUNT_ID, CF_API_TOKEN,
+      #   # CF_R2_JURISDICTION) so one shared config file can serve several buckets.
+      #   account_id: <cloudflare account id>
+      #   api_token_file: /run/secrets/r2-usage-token
+      #   # Only for a bucket created in a jurisdiction (eu, fedramp): without it
+      #   # the API answers 404 rather than a wrong figure.
+      #   jurisdiction: eu

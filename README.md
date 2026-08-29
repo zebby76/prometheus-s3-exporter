@@ -20,6 +20,7 @@ for a number it already maintains costs one request, whatever the bucket size.
 | `storagegrid` | `GET /<bucket>?x-ntap-sg-usage` | 1 | the extension enabled on the grid |
 | `minio` | MinIO Prometheus endpoint | 1 | admin JWT, or a public endpoint |
 | `cloudwatch` | `AWS/S3` daily storage metrics | 1 | `cloudwatch:GetMetricStatistics` |
+| `r2` | Cloudflare's `/r2/buckets/<bucket>/usage` | 1 | an API token with `Workers R2 Storage: Read` |
 | `list` | `ListObjectsV2` | `ceil(objects / 1000)` | nothing beyond the S3 key pair |
 
 `source: auto` (the default) probes them in that order at startup and keeps the
@@ -27,14 +28,31 @@ first that answers, so the cheap paths win where they exist and the listing
 catches everything else. The listing always succeeds, so detection can never
 come up empty.
 
-`minio` and `cloudwatch` stay inactive until their block is filled in under
-`sources` in `config/collector.yml`: both authenticate differently from S3 and
-an S3 access key alone cannot reach them.
+`minio`, `cloudwatch` and `r2` stay inactive until their block is filled in under
+`sources` in `config/collector.yml`: they authenticate differently from S3 and
+an S3 access key alone cannot reach them. `r2` also accepts `CF_ACCOUNT_ID`,
+`CF_API_TOKEN` and `CF_R2_JURISDICTION` from the environment, so one shared
+config file can serve several buckets that differ only by credential.
 
 `storagegrid` needs no extra credential -- the request is signed like any other
 S3 call -- but the grid has to expose the extension. A grid that does not answers
 HTTP 200 with an ordinary object listing rather than an error, so the probe
 checks the content type and moves on rather than reading a megabyte of XML.
+
+`r2` is the cheap path on Cloudflare R2, which otherwise has none: R2 speaks S3
+but ships no usage extension, so `list` is the only option *over S3*. The account
+API answers with the object count and the stored size in one request, whatever the
+bucket holds -- 21.6s of listing for a 19 000-object bucket became 0.2s on the
+account measured while writing this. It reads `payloadSize` plus its Infrequent
+Access counterpart, and deliberately leaves `metadataSize` out, so the figure stays
+comparable with what the listing computes.
+
+Mind the trade: these are billing aggregates, computed on a schedule. The response
+carries the `end` of the window it covers, which becomes `as_of`, so
+`webtech_s3_usage_stale_seconds` reports the real lag instead of the age of our own
+read -- 20 to 60 minutes on the account measured. Polling it more often does not
+make it fresher. The source buys a constant cost, not freshness, and a bucket where
+you need the truth at the moment you look at it is better left on `list`.
 
 The source in use is published as a label on `webtech_s3_exporter_info`, so a
 fallback stays visible in Prometheus rather than hiding in the configuration.

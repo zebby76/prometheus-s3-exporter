@@ -1,7 +1,7 @@
 ---
 services:
   exporter:
-    image: docker.io/smalswebtech/prometheus-s3-exporter
+    image: docker.io/zebby76/prometheus-s3-exporter
     restart: unless-stopped
     environment:
       - OPENSHIFT_NAMESPACE=default-namespace

@@ -7,7 +7,7 @@ variable "REL" {
 }
 
 variable "DOCKER_IMAGE_NAME" {
-  default = "smalswebtech/prometheus-s3-exporter"
+  default = "zebby76/prometheus-s3-exporter"
 }
 
 variable "DOCKER_IMAGE_VERSION" {
@@ -62,8 +62,13 @@ target "default" {
   dockerfile = "Dockerfile"
   target     = tgt
 
+  # zebbox runs on arm64 Raspberry Pis, so the image has to be a manifest list. The workflow
+  # already builds one runner per platform (native ubuntu-24.04-arm for linux/arm*), pushes each
+  # arch by digest and assembles the list with `imagetools create` — listing the platform here is
+  # all it takes to light that path up.
   platforms  = [
-    "linux/amd64"
+    "linux/amd64",
+    "linux/arm64"
   ]
 
   args = {
@@ -71,16 +76,16 @@ target "default" {
   }
 
   labels = {
-    "be.smals.webtech.monitoring.build-date"     = "${timestamp()}"
-    "be.smals.webtech.monitoring.name"           = "WebTech Monitoring Prometheus S3 Exporter"
-    "be.smals.webtech.monitoring.description"    = "Expose S3 bucket sizes as Prometheus Metrics."
-    "be.smals.webtech.monitoring.url"            = "https://wwww.smals.be"
-    "be.smals.webtech.monitoring.vcs-ref"        = GIT_HASH
-    "be.smals.webtech.monitoring.vcs-url"        = "https://github.com/Smals-Webtech/prometheus-s3-exporter"
-    "be.smals.webtech.monitoring.vendor"         = "sebastian.molle@smals.be"
-    "be.smals.webtech.monitoring.version"        = DOCKER_IMAGE_VERSION
-    "be.smals.webtech.monitoring.release"        = GIT_HASH
-    "be.smals.webtech.monitoring.schema-version" = "1.0"
+    "net.zebbox.monitoring.build-date"     = "${timestamp()}"
+    "net.zebbox.monitoring.name"           = "zebbox Monitoring Prometheus S3 Exporter"
+    "net.zebbox.monitoring.description"    = "Expose S3 bucket sizes as Prometheus Metrics."
+    "net.zebbox.monitoring.url"            = "https://www.zebbox.net"
+    "net.zebbox.monitoring.vcs-ref"        = GIT_HASH
+    "net.zebbox.monitoring.vcs-url"        = "https://github.com/zebby76/prometheus-s3-exporter"
+    "net.zebbox.monitoring.vendor"         = "sebastian.molle@gmail.com"
+    "net.zebbox.monitoring.version"        = DOCKER_IMAGE_VERSION
+    "net.zebbox.monitoring.release"        = GIT_HASH
+    "net.zebbox.monitoring.schema-version" = "1.0"
   }
 
   tags = distinct(flatten([

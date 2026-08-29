@@ -35,7 +35,7 @@ CURRENT_DIR                 := $(shell pwd)
 # assigned itself, so without this the value below would only ever reach the help text while bake
 # fell back to its own default. Exported, this file is the single source of truth. The value has to
 # stay in the registry-less form bake uses, so local tags match the ones CI publishes.
-DOCKER_IMAGE_NAME           ?= smalswebtech/prometheus-s3-exporter
+DOCKER_IMAGE_NAME           ?= zebby76/prometheus-s3-exporter
 # The export has to come after the assignment: `export VAR` on its own defines VAR as empty, which
 # would make the `?=` above a no-op.
 export DOCKER_IMAGE_NAME
@@ -112,7 +112,7 @@ _docker-bake/%:
 		${*}
 
 ##
-## Options: DOCKER_PLATFORM="linux/amd64,linux/arm64" DOCKER_BUILDER="cloud-remote" DOCKER_OUTPUT="type=registry" DOCKER_IMAGE_NAME="smalswebtech/prometheus-s3-exporter"
+## Options: DOCKER_PLATFORM="linux/amd64,linux/arm64" DOCKER_BUILDER="cloud-remote" DOCKER_OUTPUT="type=registry" DOCKER_IMAGE_NAME="zebby76/prometheus-s3-exporter"
 ##
 
 # —— Release & Tag ————————————————————————————————————————————————————————————————————————————————————————————————————
@@ -120,6 +120,8 @@ _docker-bake/%:
 .PHONY: release-info sync release retag tag-restore notes build-version
 
 # Canonical remote: 'upstream' when working from a fork, else 'origin' (the real repo).
+# NB: this fork keeps the parent repo as `smals`, NOT `upstream`, precisely so releases keep
+# targeting origin (zebby76). Renaming it to `upstream` would push tags to the parent.
 RELEASE_REMOTE              ?= $(shell git remote | grep -qx upstream && echo upstream || echo origin)
 # Fork remote we ALSO push branches to (no-op when it equals the canonical remote).
 FORK_REMOTE                 ?= origin

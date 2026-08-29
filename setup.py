@@ -8,9 +8,9 @@ setup(
     version=versioneer.get_version(),
     cmdclass=versioneer.get_cmdclass(),
     description="WebTech Monitoring - Expose S3 bucket size as a Prometheus Metric.",
-    url="https://github.com/Smals-Webtech/prometheus-s3-exporter-docker",
+    url="https://github.com/zebby76/prometheus-s3-exporter",
     author="Sebastian Molle",
-    author_email="sebastian.molle@smals.be",
+    author_email="sebastian.molle@gmail.com",
     license="MIT",
     classifiers=[
         "Development Status :: 4 - Beta",

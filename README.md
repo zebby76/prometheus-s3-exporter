@@ -4,6 +4,7 @@
 
 Exposes the size and object count of an S3 bucket as Prometheus metrics.
 
+- image: `zebby76/prometheus-s3-exporter` (linux/amd64 + linux/arm64)
 - metrics: `:9773/metrics`
 - liveness: `:9774/health`
 - readiness: `:9774/ready`
@@ -207,3 +208,11 @@ make build-version VERSION=x.y.z  # trigger a build via workflow_dispatch
 ```
 
 Run `make` with no target for the full list.
+
+## About this fork
+
+Published from the author's original project so the image can be pulled on an
+arm64 cluster: the upstream build targets `linux/amd64` only, this one ships a
+manifest list covering `linux/amd64` and `linux/arm64`. The code is otherwise
+unchanged -- metric names included, so dashboards and alert rules written
+against either build are interchangeable.

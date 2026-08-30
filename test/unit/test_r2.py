@@ -14,29 +14,35 @@ from exporter.sources import SourceContext
 from exporter.sources.base import SourceUnavailable
 from exporter.sources.r2 import R2Source, parse_usage
 
-DEFAULT_JURISDICTION = json.loads("""
+DEFAULT_JURISDICTION = json.loads(
+    """
 {"success": true, "errors": [], "messages": [],
  "result": {"end": "2026-08-29T19:20:00.000Z",
             "payloadSize": "311465243", "metadataSize": "1101125",
             "objectCount": "18987", "uploadCount": "0",
             "infrequentAccessPayloadSize": "0", "infrequentAccessMetadataSize": "0",
             "infrequentAccessObjectCount": "0", "infrequentAccessUploadCount": "0"}}
-""")
+"""
+)
 
-EU_JURISDICTION = json.loads("""
+EU_JURISDICTION = json.loads(
+    """
 {"success": true, "errors": [], "messages": [],
  "result": {"end": "2026-08-29T19:40:00.000Z",
             "payloadSize": "418426620", "metadataSize": "57466",
             "objectCount": "974", "uploadCount": "0",
             "infrequentAccessPayloadSize": "0", "infrequentAccessMetadataSize": "0",
             "infrequentAccessObjectCount": "0", "infrequentAccessUploadCount": "0"}}
-""")
+"""
+)
 
 # What the API answers for a token without Workers R2 Storage: Read.
-REFUSED = json.loads("""
+REFUSED = json.loads(
+    """
 {"success": false, "messages": [],
  "errors": [{"code": 10000, "message": "Authentication error"}], "result": null}
-""")
+"""
+)
 
 
 def make_context(**overrides):

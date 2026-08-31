@@ -14,12 +14,13 @@ from .base import SourceContext, SourceUnavailable, Usage, UsageSource
 from .cloudwatch import CloudWatchSource
 from .listing import ListingSource
 from .minio import MinioSource
+from .r2 import R2Source
 from .storagegrid import StorageGridSource
 
 AUTO = "auto"
 
 # Order matters: constant-cost sources first, the linear one last.
-SOURCES = (StorageGridSource, MinioSource, CloudWatchSource, ListingSource)
+SOURCES = (StorageGridSource, MinioSource, CloudWatchSource, R2Source, ListingSource)
 
 __all__ = [
     "AUTO",
@@ -27,6 +28,7 @@ __all__ = [
     "CloudWatchSource",
     "ListingSource",
     "MinioSource",
+    "R2Source",
     "SourceContext",
     "SourceUnavailable",
     "StorageGridSource",

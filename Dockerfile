@@ -38,7 +38,7 @@ ENTRYPOINT ["python3", "-u", "/usr/local/bin/exporter"]
 # python3 rather than curl: curl is only installed in the dev stage, so the
 # production image reported unhealthy forever.
 HEALTHCHECK --start-period=2s --interval=1m --timeout=5s --retries=5 \
-        CMD python3 -c "import urllib.request as u; u.urlopen('http://localhost:9774/health', timeout=4)"
+        CMD python3 -c "import urllib.request as u; u.urlopen('http://localhost:9774/healthz', timeout=4)"
 
 FROM prd AS dev
 

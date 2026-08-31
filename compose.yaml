@@ -23,7 +23,7 @@ services:
       test:
         - CMD-SHELL
         - python3 -c "import urllib.request as u;
-          u.urlopen('http://localhost:9774/health', timeout=4)"
+          u.urlopen('http://localhost:9774/healthz', timeout=4)"
       interval: 5s
       timeout: 5s
       retries: 12

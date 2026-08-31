@@ -19,7 +19,7 @@ configuration:
 
   # Seconds between two bucket reachability probes, on their own thread and
   # their own clock. One cheap request each, so this can stay frequent even
-  # when `interval` is measured in hours. 0 disables the probe and /ready.
+  # when `interval` is measured in hours. 0 disables the probe and /readyz.
   # Overridable with COLLECTOR_CONNECTIVITY_INTERVAL.
   - connectivity_interval: 60
 

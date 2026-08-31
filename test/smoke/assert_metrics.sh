@@ -10,8 +10,8 @@ set -o errexit
 set -o pipefail
 
 METRICS_URL="${METRICS_URL:-http://localhost:9773/metrics}"
-HEALTH_URL="${HEALTH_URL:-http://localhost:9774/health}"
-READY_URL="${READY_URL:-http://localhost:9774/ready}"
+HEALTH_URL="${HEALTH_URL:-http://localhost:9774/healthz}"
+READY_URL="${READY_URL:-http://localhost:9774/readyz}"
 # compose.override.yaml sets COLLECTOR_CONNECTIVITY_INTERVAL=5.
 PROBE_INTERVAL="${PROBE_INTERVAL:-5}"
 

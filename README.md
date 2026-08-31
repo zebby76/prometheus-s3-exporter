@@ -5,8 +5,8 @@
 Exposes the size and object count of an S3 bucket as Prometheus metrics.
 
 - metrics: `:9773/metrics`
-- liveness: `:9774/health`
-- readiness: `:9774/ready`
+- liveness: `:9774/healthz`
+- readiness: `:9774/readyz`
 
 ## Usage sources
 
@@ -101,17 +101,50 @@ would trigger one of its own.
 
 The two endpoints answer different questions:
 
-- **`/health`** is liveness: is the process responding. Independent of S3 by
+- **`/healthz`** is liveness: is the process responding. Independent of S3 by
   design, since restarting the pod does not fix an unreachable bucket and only
   throws away the metrics right when they are wanted. This drives the container
   `HEALTHCHECK`.
-- **`/ready`** is readiness: `200` while the bucket is reachable, `503` once the
+- **`/readyz`** is readiness: `200` while the bucket is reachable, `503` once the
   probe says it is not, `200` before the first probe has run. Wire an OpenShift
   readiness probe to it if you want the pod pulled out of service during an
   outage; it is safe to ignore otherwise.
 
 Set `connectivity_interval: 0` to switch the probe off entirely: no thread, no
-requests, no probe metrics, and `/ready` is not routed.
+requests, no probe metrics, and `/readyz` is not routed.
+
+## Access logs
+
+Requests are logged as logfmt on the same key set the Apache tier emits, so one
+parser reads both tiers and a request can be followed across them on `vxid` and
+`via`:
+
+```text
+ts=2026-08-31T18:57:03.720+0000 rid=4285d115ed6745bd class=health src=exporter \
+status=200 dur_us=468 method=GET uri="/readyz" qs="-" target="/readyz" bytes=37 \
+host=exporter:9774 via=apache vxid=987654 xff="10.0.0.1" proto=https \
+ua="kube-probe/1.29"
+```
+
+| Key | Value |
+| --- | --- |
+| `rid` | the inbound `X-Request-Id`, or one minted per request |
+| `class` | `metrics`, `health` (`/healthz`, `/readyz`), or `other` |
+| `dur_us` | time in the application and the response write, microseconds |
+| `uri` / `target` / `qs` | request target, path alone, query alone |
+| `bytes` | response body size; `0` for an empty body, never `-` |
+| `via` `vxid` `xff` `proto` | the `X-Smals-*` headers, `-` when absent |
+
+Access lines go to their own `access` logger, unprefixed and not propagated:
+mixing them with the process-wide format would put a second timestamp in front
+of each line and break the parse. Lower them with:
+
+```python
+logging.getLogger("access").setLevel(logging.WARNING)
+```
+
+A Prometheus scrape every 15s plus the container healthcheck is roughly 7 000
+lines a day per instance.
 
 ## Alerting
 

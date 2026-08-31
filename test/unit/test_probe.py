@@ -1,5 +1,6 @@
-"""Connectivity probe: method selection, outcomes, and the /ready endpoint."""
+"""Connectivity probe: method selection, outcomes, and the /readyz endpoint."""
 
+import logging
 import threading
 from datetime import datetime, timedelta, timezone
 
@@ -77,6 +78,44 @@ def test_a_missing_bucket_is_still_an_outage():
     assert client.calls == ["head_bucket"]
 
 
+def test_each_check_logs_its_round_trip_time(caplog):
+    # Same shape as the collector's own line, so both are readable side by side.
+    client = FakeClient()
+    with caplog.at_level(logging.DEBUG):
+        ConnectivityProbe(client, "my-bucket", 60).check_once()
+
+    assert any(
+        record.levelno == logging.DEBUG
+        and "Probe S3 Bucket my-bucket via HeadBucket in" in record.message
+        for record in caplog.records
+    )
+
+
+def test_the_fallback_is_named_in_the_timing_line(caplog):
+    client = FakeClient(head_error=ClientError("403"))
+    with caplog.at_level(logging.DEBUG):
+        ConnectivityProbe(client, "my-bucket", 60).check_once()
+
+    assert any(
+        "Probe S3 Bucket my-bucket via ListObjectsV2 in" in record.message
+        for record in caplog.records
+    )
+
+
+def test_a_failed_check_reports_how_long_it_took(caplog):
+    client = FakeClient(head_error=ConnectionError("connection refused"))
+    probe = ConnectivityProbe(client, "my-bucket", 60)
+    probe._result = ProbeResult(reachable=True, checked_at=NOW)
+
+    with caplog.at_level(logging.ERROR):
+        probe.check_once()
+
+    assert any(
+        "became unreachable via HeadBucket after" in record.message
+        for record in caplog.records
+    )
+
+
 def test_the_fallback_decision_is_remembered():
     client = FakeClient(head_error=ClientError("AccessDenied"))
     probe = ConnectivityProbe(client, "my-bucket", 60)
@@ -152,7 +191,7 @@ def test_the_thread_stops_on_the_shared_event():
     assert not thread.is_alive()
 
 
-# --- /ready ---------------------------------------------------------------
+# --- /readyz ---------------------------------------------------------------
 
 
 class StubProbe:

@@ -16,7 +16,7 @@ help: # Show help for each of the Makefile recipes.
 	@echo "Image output: ${DOCKER_OUTPUT}"
 	@echo ""
 	@echo "METRICS:       http://localhost:9773/metrics"
-	@echo "HEALTH:        http://localhost:9774/health"
+	@echo "HEALTH:        http://localhost:9774/healthz"
 	@echo "---------------------------"
 	@echo ""
 	@echo "Usage: make [target]"

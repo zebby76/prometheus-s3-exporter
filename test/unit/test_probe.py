@@ -57,6 +57,26 @@ def test_head_bucket_denied_falls_back_to_a_one_key_listing():
     assert ("list_objects_v2", 1) in client.calls
 
 
+def test_head_bucket_denied_without_a_body_falls_back_too():
+    # A HEAD reply has no body for botocore to parse, so it reports the HTTP
+    # status as the code. This is the shape production actually produces.
+    client = FakeClient(head_error=ClientError("403"))
+    result = ConnectivityProbe(client, "my-bucket", 60).check_once()
+
+    assert result.reachable is True
+    assert ("list_objects_v2", 1) in client.calls
+
+
+def test_a_missing_bucket_is_still_an_outage():
+    # 404 must not be read as a permission problem, or a bucket that vanished
+    # would be probed forever through a listing that fails just as hard.
+    client = FakeClient(head_error=ClientError("404"))
+    result = ConnectivityProbe(client, "my-bucket", 60).check_once()
+
+    assert result.reachable is False
+    assert client.calls == ["head_bucket"]
+
+
 def test_the_fallback_decision_is_remembered():
     client = FakeClient(head_error=ClientError("AccessDenied"))
     probe = ConnectivityProbe(client, "my-bucket", 60)

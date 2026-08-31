@@ -18,7 +18,22 @@ from typing import Optional
 
 # Errors that mean "you may not do this", as opposed to "the bucket is not
 # there". They send us to the fallback instead of reporting an outage.
-_FORBIDDEN_CODES = frozenset({"AccessDenied", "MethodNotAllowed", "NotImplemented"})
+#
+# Both spellings are needed. A HEAD reply carries no body, so botocore has no
+# XML to read and fills in the HTTP status instead -- a denied HeadBucket comes
+# back as "403", never as "AccessDenied". The names still matter for providers
+# that answer a HEAD with a body anyway. 404 is deliberately absent: a missing
+# bucket is an outage, not a permission problem.
+_FORBIDDEN_CODES = frozenset(
+    {
+        "AccessDenied",
+        "MethodNotAllowed",
+        "NotImplemented",
+        "403",
+        "405",
+        "501",
+    }
+)
 
 
 @dataclass(frozen=True)

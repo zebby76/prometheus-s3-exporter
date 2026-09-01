@@ -194,9 +194,9 @@ requests, no probe metrics, and `/readyz` is not routed.
 
 ## Access logs
 
-Requests are logged as logfmt on the same key set the Apache tier emits, so one
-parser reads both tiers and a request can be followed across them on `vxid` and
-`via`:
+Requests are logged as logfmt on the same key set a reverse proxy tier emits, so
+one parser reads both tiers and a request can be followed across them on `vxid`
+and `via`:
 
 ```text
 ts=2026-08-31T18:57:03.720+0000 rid=4285d115ed6745bd class=health src=exporter \
@@ -212,7 +212,24 @@ ua="kube-probe/1.29"
 | `dur_us` | time in the application and the response write, microseconds |
 | `uri` / `target` / `qs` | request target, path alone, query alone |
 | `bytes` | response body size; `0` for an empty body, never `-` |
-| `via` `vxid` `xff` `proto` | the `X-Smals-*` headers, `-` when absent |
+| `via` `vxid` `xff` `proto` | the proxy header family, `-` when absent |
+
+Every proxy names its correlation headers differently, and not as variations on
+one prefix, so each is named in full under `proxy_headers`:
+
+```yaml
+  - proxy_headers:
+      via: Via
+      vxid: X-Transaction-Id
+      xff: X-Forwarded-For
+      proto: X-Forwarded-Proto
+```
+
+Those are the defaults -- three of them the real standard headers. Name only what
+your proxy stamps differently; the rest keep their defaults, so naming one header
+never blanks the others. Each has its own override:
+`COLLECTOR_PROXY_HEADER_VIA`, `_VXID`, `_XFF`, `_PROTO`. A header that is not
+sent logs as `-`.
 
 Access lines go to their own `access` logger, unprefixed and not propagated:
 mixing them with the process-wide format would put a second timestamp in front

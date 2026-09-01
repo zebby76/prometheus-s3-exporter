@@ -24,6 +24,17 @@ _TRAFFIC_CLASSES = {
     "/readyz": "health",
 }
 
+# The correlation fields come from headers the reverse proxy stamps, and every
+# edge names them differently. Keyed by the log field they fill, so a deployment
+# renames what it has to and leaves the rest alone. Three of the four defaults
+# are the real standard headers; only a transaction id has no standard name.
+DEFAULT_PROXY_HEADERS = {
+    "via": "Via",
+    "vxid": "X-Transaction-Id",
+    "xff": "X-Forwarded-For",
+    "proto": "X-Forwarded-Proto",
+}
+
 # Apache renders a missing header or note as a bare dash; keep that so both
 # tiers can be read by one parser without special cases.
 _ABSENT = "-"
@@ -48,6 +59,27 @@ def _access_logger():
     return logger
 
 
+def set_proxy_headers(headers):
+    """Name the proxy headers the access log reads, by the field they fill.
+
+    Merged onto the defaults rather than replacing them, so naming one header
+    does not silently blank the other three.
+    """
+    resolved = dict(DEFAULT_PROXY_HEADERS)
+    if isinstance(headers, dict):
+        for field, name in headers.items():
+            if field in resolved and name:
+                resolved[field] = str(name)
+    elif headers:
+        logging.error("proxy_headers is not a mapping, using defaults: %r", headers)
+
+    LogfmtRequestHandler.proxy_headers = resolved
+    logging.info(
+        "Access log correlation headers: %s",
+        ", ".join(f"{field}={name}" for field, name in resolved.items()),
+    )
+
+
 class LogfmtRequestHandler(simple_server.WSGIRequestHandler):
     """Access logs in the same logfmt shape the Apache tier emits.
 
@@ -55,6 +87,10 @@ class LogfmtRequestHandler(simple_server.WSGIRequestHandler):
     altogether. Emitting the edge's key set instead means one parser reads both
     tiers, and a request can be followed across them on `vxid` and `via`.
     """
+
+    # Set once at startup by set_proxy_headers(); a class attribute because
+    # wsgiref instantiates the handler itself, once per request.
+    proxy_headers = DEFAULT_PROXY_HEADERS
 
     def get_environ(self):
         # Called once per request, immediately before the app runs, so it
@@ -83,6 +119,7 @@ class LogfmtRequestHandler(simple_server.WSGIRequestHandler):
     def log_request(self, code="-", size="-"):
         elapsed = time.perf_counter() - getattr(self, "_started", time.perf_counter())
         target, _, query = self.path.partition("?")
+        proxy = self.proxy_headers
 
         fields = [
             ("ts", self._timestamp(), False),
@@ -98,10 +135,10 @@ class LogfmtRequestHandler(simple_server.WSGIRequestHandler):
             # Apache's %B is 0 for an empty body, where wsgiref passes "-".
             ("bytes", 0 if size == "-" else size, False),
             ("host", self._header("Host"), False),
-            ("via", self._header("X-Smals-Via"), False),
-            ("vxid", self._header("X-Smals-Vxid"), False),
-            ("xff", self._header("X-Smals-Forwarded-For"), True),
-            ("proto", self._header("X-Smals-Forwarded-Proto"), False),
+            ("via", self._header(proxy["via"]), False),
+            ("vxid", self._header(proxy["vxid"]), False),
+            ("xff", self._header(proxy["xff"]), True),
+            ("proto", self._header(proxy["proto"]), False),
             ("ua", self._header("User-agent"), True),
         ]
 

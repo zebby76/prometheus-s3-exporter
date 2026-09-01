@@ -36,6 +36,16 @@ configuration:
   # be recorded as latency. The probe retries once itself, immediately.
   - probe_timeout: 5
 
+  # Headers the access log reads for its four correlation fields, so the
+  # exporter's lines join the reverse proxy's on the same request. Name only the
+  # ones your proxy stamps differently; the rest keep the defaults below. Each is
+  # overridable on its own with COLLECTOR_PROXY_HEADER_VIA, _VXID, _XFF, _PROTO.
+  - proxy_headers:
+      via: Via
+      vxid: X-Transaction-Id
+      xff: X-Forwarded-For
+      proto: X-Forwarded-Proto
+
   # Seconds before retrying a failed collection, capped at `interval`. Without
   # it, one transient failure at a 60 minute interval leaves the figures stale
   # for a full hour.

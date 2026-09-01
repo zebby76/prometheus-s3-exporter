@@ -19,7 +19,12 @@ from prometheus_client.core import REGISTRY, GaugeMetricFamily
 
 from exporter import sources
 from exporter._version import get_versions
-from exporter.handler import exporter, health
+from exporter.handler import (
+    DEFAULT_PROXY_HEADERS,
+    exporter,
+    health,
+    set_proxy_headers,
+)
 from exporter.probe import ConnectivityProbe
 from exporter.sources import SourceContext, Usage, UsageSource
 
@@ -215,6 +220,7 @@ def load_configuration(path=CONFIG_PATH):
         "connectivity_interval": DEFAULT_CONNECTIVITY_INTERVAL_SECONDS,
         "retry_interval": DEFAULT_RETRY_INTERVAL_SECONDS,
         "probe_timeout": DEFAULT_PROBE_TIMEOUT_SECONDS,
+        "proxy_headers": dict(DEFAULT_PROXY_HEADERS),
     }
 
     document = {}
@@ -244,6 +250,16 @@ def load_configuration(path=CONFIG_PATH):
             logging.error(
                 "COLLECTOR_CONNECTIVITY_INTERVAL is not a number: %r", env_probe
             )
+
+    # One variable per field, so a deployment can name a single header without
+    # having to restate the other three.
+    for field in DEFAULT_PROXY_HEADERS:
+        env_header = os.getenv(f"COLLECTOR_PROXY_HEADER_{field.upper()}")
+        if env_header:
+            headers = settings.get("proxy_headers")
+            if not isinstance(headers, dict):
+                headers = {}
+            settings["proxy_headers"] = {**headers, field: env_header}
 
     configured_sources = settings.get("sources")
     if configured_sources is None:
@@ -736,6 +752,7 @@ def main():
 
     probe.start(STOP)
 
+    set_proxy_headers(settings["proxy_headers"])
     exporter(port=9773)
     health(port=9774, probe=probe if connectivity_interval else None)
 

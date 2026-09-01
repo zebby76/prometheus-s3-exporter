@@ -7,7 +7,13 @@ import time
 
 import pytest
 
-from exporter.handler import ACCESS_LOGGER_NAME, LogfmtRequestHandler, _access_logger
+from exporter.handler import (
+    ACCESS_LOGGER_NAME,
+    DEFAULT_PROXY_HEADERS,
+    LogfmtRequestHandler,
+    _access_logger,
+    set_proxy_headers,
+)
 
 
 class Collector(logging.Handler):
@@ -158,10 +164,10 @@ def test_a_request_id_is_minted_when_the_edge_sent_none():
 def test_the_edge_correlation_headers_are_passed_through(access_lines):
     request(
         headers={
-            "X-Smals-Via": "apache",
-            "X-Smals-Vxid": "987654",
-            "X-Smals-Forwarded-For": "10.0.0.1, 10.0.0.2",
-            "X-Smals-Forwarded-Proto": "https",
+            "Via": "apache",
+            "X-Transaction-Id": "987654",
+            "X-Forwarded-For": "10.0.0.1, 10.0.0.2",
+            "X-Forwarded-Proto": "https",
         }
     ).log_request(200, 0)
     fields = parse(access_lines[0])
@@ -170,3 +176,45 @@ def test_the_edge_correlation_headers_are_passed_through(access_lines):
     assert fields["vxid"] == "987654"
     assert fields["xff"] == "10.0.0.1, 10.0.0.2"
     assert fields["proto"] == "https"
+
+
+def test_each_header_is_named_in_full_by_configuration(access_lines):
+    # Every edge names these differently, and not as variations on one prefix.
+    set_proxy_headers({"via": "X-Acme-Via", "vxid": "X-Acme-Trace"})
+    try:
+        request(
+            headers={
+                "X-Acme-Via": "apache",
+                "X-Acme-Trace": "987654",
+                "Via": "ignored",
+                "X-Forwarded-Proto": "https",
+            }
+        ).log_request(200, 0)
+    finally:
+        set_proxy_headers(DEFAULT_PROXY_HEADERS)
+
+    fields = parse(access_lines[0])
+    assert fields["via"] == "apache"
+    assert fields["vxid"] == "987654"
+    # Named nothing, so it keeps its default rather than going blank.
+    assert fields["proto"] == "https"
+
+
+def test_naming_one_header_leaves_the_others_at_their_defaults():
+    set_proxy_headers({"xff": "X-Acme-Client-Ip"})
+    try:
+        assert LogfmtRequestHandler.proxy_headers == {
+            **DEFAULT_PROXY_HEADERS,
+            "xff": "X-Acme-Client-Ip",
+        }
+    finally:
+        set_proxy_headers(DEFAULT_PROXY_HEADERS)
+
+
+@pytest.mark.parametrize("configured", [None, "", {}, {"via": ""}, "X-Acme"])
+def test_a_useless_configuration_falls_back_to_the_defaults(configured):
+    # An unset environment variable, or a mapping mistyped as a string, must not
+    # silently blank the four fields.
+    set_proxy_headers(configured)
+
+    assert LogfmtRequestHandler.proxy_headers == DEFAULT_PROXY_HEADERS

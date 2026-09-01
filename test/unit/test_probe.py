@@ -1,5 +1,6 @@
-"""Connectivity probe: method selection, outcomes, and the /ready endpoint."""
+"""Connectivity probe: method selection, outcomes, and the /readyz endpoint."""
 
+import logging
 import threading
 from datetime import datetime, timedelta, timezone
 
@@ -57,6 +58,65 @@ def test_head_bucket_denied_falls_back_to_a_one_key_listing():
     assert ("list_objects_v2", 1) in client.calls
 
 
+def test_head_bucket_denied_without_a_body_falls_back_too():
+    # A HEAD reply has no body for botocore to parse, so it reports the HTTP
+    # status as the code. This is the shape production actually produces.
+    client = FakeClient(head_error=ClientError("403"))
+    result = ConnectivityProbe(client, "my-bucket", 60).check_once()
+
+    assert result.reachable is True
+    assert ("list_objects_v2", 1) in client.calls
+
+
+def test_a_missing_bucket_is_still_an_outage():
+    # 404 must not be read as a permission problem, or a bucket that vanished
+    # would be probed forever through a listing that fails just as hard.
+    client = FakeClient(head_error=ClientError("404"))
+    result = ConnectivityProbe(client, "my-bucket", 60).check_once()
+
+    assert result.reachable is False
+    # Retried once, and never downgraded to the listing.
+    assert client.calls == ["head_bucket", "head_bucket"]
+
+
+def test_each_check_logs_its_round_trip_time(caplog):
+    # Same shape as the collector's own line, so both are readable side by side.
+    client = FakeClient()
+    with caplog.at_level(logging.DEBUG):
+        ConnectivityProbe(client, "my-bucket", 60).check_once()
+
+    assert any(
+        record.levelno == logging.DEBUG
+        and "Probe S3 Bucket my-bucket via HeadBucket in" in record.message
+        for record in caplog.records
+    )
+
+
+def test_the_fallback_is_named_in_the_timing_line(caplog):
+    client = FakeClient(head_error=ClientError("403"))
+    with caplog.at_level(logging.DEBUG):
+        ConnectivityProbe(client, "my-bucket", 60).check_once()
+
+    assert any(
+        "Probe S3 Bucket my-bucket via ListObjectsV2 in" in record.message
+        for record in caplog.records
+    )
+
+
+def test_a_failed_check_reports_how_long_it_took(caplog):
+    client = FakeClient(head_error=ConnectionError("connection refused"))
+    probe = ConnectivityProbe(client, "my-bucket", 60)
+    probe._result = ProbeResult(reachable=True, checked_at=NOW)
+
+    with caplog.at_level(logging.ERROR):
+        probe.check_once()
+
+    assert any(
+        "became unreachable via HeadBucket after" in record.message
+        for record in caplog.records
+    )
+
+
 def test_the_fallback_decision_is_remembered():
     client = FakeClient(head_error=ClientError("AccessDenied"))
     probe = ConnectivityProbe(client, "my-bucket", 60)
@@ -76,7 +136,7 @@ def test_a_real_outage_is_not_mistaken_for_a_permission_problem():
     assert result.reachable is False
     assert "NoSuchBucket" in result.error
     # Never silently downgraded to the listing.
-    assert client.calls == ["head_bucket"]
+    assert client.calls == ["head_bucket", "head_bucket"]
 
 
 def test_unreachable_bucket_reports_the_error():
@@ -108,6 +168,71 @@ def test_rebuilt_client_is_adopted_and_the_method_re_decided():
     assert "head_bucket" in second.calls
 
 
+class StaleConnectionClient:
+    """Fails the first call the way a dropped idle socket does, then works."""
+
+    def __init__(self):
+        self.calls = 0
+
+    def head_bucket(self, **kwargs):
+        self.calls += 1
+        if self.calls == 1:
+            raise ConnectionError("Connection aborted, RemoteDisconnected")
+
+
+def test_a_dropped_connection_is_retried_at_once_and_is_not_an_outage():
+    # A load balancer that closes idle connections leaves a dead socket in the
+    # pool. Reopening it costs one connection setup; calling that an outage
+    # would take the pod out of service on a purely local matter.
+    client = StaleConnectionClient()
+    probe = ConnectivityProbe(client, "my-bucket", 30)
+
+    result = probe.check_once()
+
+    assert result.reachable is True
+    assert result.attempts == 2
+    assert client.calls == 2
+
+
+def test_a_healthy_check_does_not_retry():
+    probe = ConnectivityProbe(FakeClient(), "my-bucket", 30)
+
+    result = probe.check_once()
+
+    assert result.attempts == 1
+    assert probe.retries_total == 0
+
+
+def test_retries_are_counted_so_a_reconnection_is_visible():
+    # The whole point of retrying here rather than in botocore: its backoff
+    # would hide inside probe_duration_seconds as latency.
+    probe = ConnectivityProbe(StaleConnectionClient(), "my-bucket", 30)
+    probe.check_once()
+
+    assert probe.retries_total == 1
+
+
+def test_a_sustained_outage_gives_up_after_the_second_attempt():
+    client = FakeClient(head_error=ConnectionError("connection refused"))
+    probe = ConnectivityProbe(client, "my-bucket", 30)
+
+    result = probe.check_once()
+
+    assert result.reachable is False
+    assert result.attempts == 2
+
+
+def test_the_retry_counter_survives_a_client_rebuild():
+    # It is monotonic on purpose: a counter that went backwards would break
+    # increase() over it.
+    probe = ConnectivityProbe(StaleConnectionClient(), "my-bucket", 30)
+    probe.check_once()
+    probe.set_client(StaleConnectionClient())
+    probe.check_once()
+
+    assert probe.retries_total == 2
+
+
 def test_age_is_zero_before_the_first_probe():
     assert ProbeResult().age_seconds(now=NOW) == 0.0
 
@@ -132,7 +257,7 @@ def test_the_thread_stops_on_the_shared_event():
     assert not thread.is_alive()
 
 
-# --- /ready ---------------------------------------------------------------
+# --- /readyz ---------------------------------------------------------------
 
 
 class StubProbe:

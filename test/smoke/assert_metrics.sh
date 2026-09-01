@@ -10,8 +10,8 @@ set -o errexit
 set -o pipefail
 
 METRICS_URL="${METRICS_URL:-http://localhost:9773/metrics}"
-HEALTH_URL="${HEALTH_URL:-http://localhost:9774/health}"
-READY_URL="${READY_URL:-http://localhost:9774/ready}"
+HEALTH_URL="${HEALTH_URL:-http://localhost:9774/healthz}"
+READY_URL="${READY_URL:-http://localhost:9774/readyz}"
 # compose.override.yaml sets COLLECTOR_CONNECTIVITY_INTERVAL=5.
 PROBE_INTERVAL="${PROBE_INTERVAL:-5}"
 
@@ -88,6 +88,7 @@ assert_equals webtech_s3_collect_interval_seconds "$(value_of webtech_s3_collect
 assert_equals webtech_s3_bucket_reachable "$(value_of webtech_s3_bucket_reachable)" 1
 assert_present webtech_s3_bucket_probe_duration_seconds
 assert_present webtech_s3_bucket_probe_age_seconds
+assert_present webtech_s3_bucket_probe_retries_total
 
 # The detected source is published as a label so a fallback stays visible.
 if ! grep -q 'webtech_s3_exporter_info{.*source="' <<<"${scrape}"; then

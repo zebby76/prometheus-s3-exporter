@@ -49,7 +49,7 @@ def make_context(**overrides):
     defaults = dict(
         endpoint_url="https://acct.r2.cloudflarestorage.com",
         region="auto",
-        bucket="zebbox-loki",
+        bucket="my-bucket",
         access_key="ak",
         secret_key="sk",
         client=object(),
@@ -60,7 +60,7 @@ def make_context(**overrides):
 
 
 def test_parses_the_figures_the_api_returns_as_strings():
-    usage = parse_usage(DEFAULT_JURISDICTION, "zebbox-loki")
+    usage = parse_usage(DEFAULT_JURISDICTION, "my-bucket")
     assert usage.size_bytes == 311465243
     assert usage.object_count == 18987
 
@@ -68,7 +68,7 @@ def test_parses_the_figures_the_api_returns_as_strings():
 def test_metadata_size_is_excluded_to_stay_comparable_with_the_listing():
     # The listing sums object payloads only; counting Cloudflare's metadata here
     # would make the two sources disagree by design on the very same bucket.
-    assert parse_usage(DEFAULT_JURISDICTION, "zebbox-loki").size_bytes == 311465243
+    assert parse_usage(DEFAULT_JURISDICTION, "my-bucket").size_bytes == 311465243
 
 
 def test_infrequent_access_objects_are_counted_too():
@@ -76,13 +76,13 @@ def test_infrequent_access_objects_are_counted_too():
     document["result"]["infrequentAccessPayloadSize"] = "1000"
     document["result"]["infrequentAccessObjectCount"] = "7"
 
-    usage = parse_usage(document, "zebbox-loki")
+    usage = parse_usage(document, "my-bucket")
     assert usage.size_bytes == 311465243 + 1000
     assert usage.object_count == 18987 + 7
 
 
 def test_staleness_comes_from_the_aggregation_window():
-    usage = parse_usage(EU_JURISDICTION, "restic-backup")
+    usage = parse_usage(EU_JURISDICTION, "my-eu-bucket")
     assert usage.as_of == datetime(2026, 8, 29, 19, 40, tzinfo=timezone.utc)
 
     now = usage.as_of + timedelta(minutes=40)
@@ -92,30 +92,30 @@ def test_staleness_comes_from_the_aggregation_window():
 def test_a_missing_window_is_reported_as_live_rather_than_guessed():
     document = json.loads(json.dumps(DEFAULT_JURISDICTION))
     del document["result"]["end"]
-    assert parse_usage(document, "zebbox-loki").as_of is None
+    assert parse_usage(document, "my-bucket").as_of is None
 
 
 def test_an_unparsable_window_does_not_break_the_reading():
     document = json.loads(json.dumps(DEFAULT_JURISDICTION))
     document["result"]["end"] = "not a date"
-    assert parse_usage(document, "zebbox-loki").as_of is None
+    assert parse_usage(document, "my-bucket").as_of is None
 
 
 def test_a_refused_call_names_the_reason():
     with pytest.raises(SourceUnavailable, match="Authentication error"):
-        parse_usage(REFUSED, "zebbox-loki")
+        parse_usage(REFUSED, "my-bucket")
 
 
 def test_a_success_without_figures_is_unavailable():
     with pytest.raises(SourceUnavailable, match="no figures"):
-        parse_usage({"success": True, "result": None}, "zebbox-loki")
+        parse_usage({"success": True, "result": None}, "my-bucket")
 
 
 def test_a_non_numeric_figure_is_unavailable():
     document = json.loads(json.dumps(DEFAULT_JURISDICTION))
     document["result"]["objectCount"] = "many"
     with pytest.raises(SourceUnavailable, match="objectCount"):
-        parse_usage(document, "zebbox-loki")
+        parse_usage(document, "my-bucket")
 
 
 def test_probe_stays_silent_when_nothing_is_configured(monkeypatch):
@@ -137,7 +137,7 @@ def test_probe_reads_the_environment_when_the_config_is_empty(monkeypatch):
 
 
 def test_the_jurisdiction_header_is_sent_only_when_asked(monkeypatch):
-    ctx = make_context(bucket="restic-backup")
+    ctx = make_context(bucket="my-eu-bucket")
     plain = R2Source(ctx, "acct", "token")
     assert "cf-r2-jurisdiction" not in plain._headers
 
@@ -145,4 +145,4 @@ def test_the_jurisdiction_header_is_sent_only_when_asked(monkeypatch):
     # without the header the API answers 404 rather than a wrong figure.
     scoped = R2Source(ctx, "acct", "token", jurisdiction="eu")
     assert scoped._headers["cf-r2-jurisdiction"] == "eu"
-    assert scoped._url.endswith("/r2/buckets/restic-backup/usage")
+    assert scoped._url.endswith("/r2/buckets/my-eu-bucket/usage")

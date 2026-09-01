@@ -4,7 +4,13 @@ import logging
 import time
 from datetime import datetime, timedelta, timezone
 
-from exporter import BucketSizeCollector, Snapshot, collect_once, load_configuration
+from exporter import (
+    DEFAULT_CONNECTIVITY_INTERVAL_SECONDS,
+    BucketSizeCollector,
+    Snapshot,
+    collect_once,
+    load_configuration,
+)
 from exporter.probe import ProbeResult
 from exporter.sources.base import SourceUnavailable, Usage
 
@@ -179,13 +185,15 @@ def test_fast_collection_is_not_warned_about(caplog):
 
 
 class StubProbe:
-    def __init__(self, result):
+    def __init__(self, result, retries_total=0):
         self.result = result
+        self.retries_total = retries_total
 
 
 def test_probe_metrics_are_published_when_a_probe_is_wired():
     probe = StubProbe(
-        ProbeResult(reachable=True, duration_seconds=0.012, checked_at=NOW)
+        ProbeResult(reachable=True, duration_seconds=0.012, checked_at=NOW),
+        retries_total=7,
     )
     collector = BucketSizeCollector("ns", "my-bucket", 60, probe=probe)
     collect_once(StubSource(usage=Usage(1, 1)), collector, "my-bucket")
@@ -198,6 +206,9 @@ def test_probe_metrics_are_published_when_a_probe_is_wired():
     assert values["webtech_s3_bucket_reachable"] == 1
     assert values["webtech_s3_bucket_probe_duration_seconds"] == 0.012
     assert "webtech_s3_bucket_probe_age_seconds" in values
+    # Published so a reconnection reads as a reconnection instead of hiding in
+    # the duration as latency.
+    assert values["webtech_s3_bucket_probe_retries_total"] == 7
 
 
 def test_an_unreachable_bucket_is_reported_as_zero():
@@ -241,7 +252,7 @@ def test_collection_metrics_survive_an_unreachable_bucket():
 
 def test_connectivity_and_retry_defaults():
     settings = load_configuration("/nonexistent/collector.yml")
-    assert settings["connectivity_interval"] == 60
+    assert settings["connectivity_interval"] == DEFAULT_CONNECTIVITY_INTERVAL_SECONDS
     assert settings["retry_interval"] == 300
 
 
@@ -252,7 +263,10 @@ def test_connectivity_interval_can_be_overridden_from_the_environment(monkeypatc
 
 def test_a_bad_connectivity_override_keeps_the_default(monkeypatch):
     monkeypatch.setenv("COLLECTOR_CONNECTIVITY_INTERVAL", "soon")
-    assert load_configuration("/nonexistent")["connectivity_interval"] == 60
+    assert (
+        load_configuration("/nonexistent")["connectivity_interval"]
+        == DEFAULT_CONNECTIVITY_INTERVAL_SECONDS
+    )
 
 
 def test_environment_override_applies_without_a_configuration_file(monkeypatch):

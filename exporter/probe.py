@@ -36,6 +36,16 @@ _FORBIDDEN_CODES = frozenset(
 )
 
 
+# One immediate retry, and no more. A load balancer that drops idle connections
+# leaves a dead socket in the pool, and the first write on it fails; reopening
+# costs one connection setup -- ~120ms on a local grid -- against which the
+# alternative, letting botocore retry, costs a random sleep of up to a second
+# that is recorded as latency. Retrying anything rather than just connection
+# errors keeps this honest: one extra request a cycle is not worth the fragility
+# of matching exception types.
+_MAX_ATTEMPTS = 2
+
+
 @dataclass(frozen=True)
 class ProbeResult:
     """Outcome of one reachability check.
@@ -48,6 +58,7 @@ class ProbeResult:
     duration_seconds: float = 0.0
     checked_at: Optional[datetime] = None
     error: Optional[str] = None
+    attempts: int = 0
 
     def age_seconds(self, now: Optional[datetime] = None) -> float:
         """Seconds since this check ran; 0 before the first one."""
@@ -69,10 +80,18 @@ class ConnectivityProbe:
         # allowed to make; then it stays put. The label names it in the logs.
         self._method = None
         self._method_label = None
+        # Monotonic, and deliberately not reset by set_client(): a counter that
+        # went backwards on a client rebuild would break rate() over it.
+        self._retries_total = 0
 
     @property
     def result(self) -> ProbeResult:
         return self._result
+
+    @property
+    def retries_total(self) -> int:
+        """Immediate retries performed since start, across all checks."""
+        return self._retries_total
 
     def set_client(self, client):
         """Adopt a rebuilt S3 client, re-deciding which call to use."""
@@ -93,35 +112,49 @@ class ConnectivityProbe:
         response = getattr(exc, "response", None) or {}
         return str(response.get("Error", {}).get("Code", ""))
 
+    def _attempt(self):
+        """One call, settling which one this credential may make on the first."""
+        if self._method is None:
+            # HeadBucket is the cheapest probe, but a bucket-scoped policy
+            # may not grant it. Settle the question once.
+            try:
+                self._head_bucket()
+                self._method = self._head_bucket
+                self._method_label = "HeadBucket"
+                logging.info("Connectivity probe using HeadBucket")
+                return
+            except Exception as exc:
+                if self._error_code(exc) not in _FORBIDDEN_CODES:
+                    raise
+                logging.info(
+                    "Connectivity probe falling back to ListObjectsV2: "
+                    "HeadBucket denied (%s)",
+                    self._error_code(exc),
+                )
+                self._method = self._list_one
+                self._method_label = "ListObjectsV2"
+
+        self._method()
+
     def check_once(self) -> ProbeResult:
         """Run one check and publish it. Never raises."""
         started = time.perf_counter()
         error = None
+        attempts = 0
 
-        try:
-            if self._method is None:
-                # HeadBucket is the cheapest probe, but a bucket-scoped policy
-                # may not grant it. Settle the question once.
-                try:
-                    self._head_bucket()
-                    self._method = self._head_bucket
-                    self._method_label = "HeadBucket"
-                    logging.info("Connectivity probe using HeadBucket")
-                except Exception as exc:
-                    if self._error_code(exc) not in _FORBIDDEN_CODES:
-                        raise
-                    logging.info(
-                        "Connectivity probe falling back to ListObjectsV2: "
-                        "HeadBucket denied (%s)",
-                        self._error_code(exc),
-                    )
-                    self._method = self._list_one
-                    self._method_label = "ListObjectsV2"
-                    self._method()
-            else:
-                self._method()
-        except Exception as exc:
-            error = f"{type(exc).__name__}: {exc}"
+        while attempts < _MAX_ATTEMPTS:
+            attempts += 1
+            try:
+                self._attempt()
+                error = None
+                break
+            except Exception as exc:
+                error = f"{type(exc).__name__}: {exc}"
+                if attempts < _MAX_ATTEMPTS:
+                    # Counted, not hidden: a probe that had to reconnect is a
+                    # fact about the path, and the whole point of doing this
+                    # here rather than in botocore is that it stays visible.
+                    self._retries_total += 1
 
         duration = time.perf_counter() - started
         result = ProbeResult(
@@ -129,6 +162,7 @@ class ConnectivityProbe:
             duration_seconds=duration,
             checked_at=datetime.now(timezone.utc),
             error=error,
+            attempts=attempts,
         )
 
         previous = self._result
@@ -142,18 +176,21 @@ class ConnectivityProbe:
             # Debug, not info: one line per interval per instance is a lot of
             # log for a number the probe_duration_seconds gauge already carries.
             logging.debug(
-                "Probe S3 Bucket %s via %s in %.3fs",
+                "Probe S3 Bucket %s via %s in %.3fs (%s attempt%s)",
                 self._bucket,
                 method,
                 duration,
+                attempts,
+                "" if attempts == 1 else "s",
             )
 
         if error is not None and previous.reachable:
             logging.error(
-                "Bucket %s became unreachable via %s after %.3fs: %s",
+                "Bucket %s became unreachable via %s after %.3fs and %s attempts: %s",
                 self._bucket,
                 method,
                 duration,
+                attempts,
                 error,
             )
         elif (
@@ -164,10 +201,11 @@ class ConnectivityProbe:
             # Repeats stay at debug: an outage lasting hours would otherwise
             # fill the log with one identical error per interval.
             logging.debug(
-                "Bucket %s still unreachable via %s after %.3fs: %s",
+                "Bucket %s still unreachable via %s after %.3fs and %s attempts: %s",
                 self._bucket,
                 method,
                 duration,
+                attempts,
                 error,
             )
 

@@ -13,6 +13,7 @@ from typing import Optional
 
 import boto3
 import yaml
+from botocore.config import Config
 from prometheus_client import Info
 from prometheus_client.core import REGISTRY, GaugeMetricFamily
 
@@ -50,7 +51,19 @@ SLOW_COLLECTION_RATIO = 0.25
 # Seconds between reachability probes. The collection interval is sized for the
 # cost of measuring the bucket, which on a large one runs into tens of minutes;
 # reachability has to be answered far more often than that. 0 disables it.
-DEFAULT_CONNECTIVITY_INTERVAL_SECONDS = 60
+#
+# 30 and not 60: between two hourly collections the probe is the only traffic on
+# its connection, so the interval is also what keeps that connection alive. A 60
+# second probe against the equally common 60 second idle timeout sits exactly on
+# the boundary and reconnects on roughly every other cycle -- measured, and the
+# reason this default moved. Keep it under the idle timeout in front of the
+# storage system.
+DEFAULT_CONNECTIVITY_INTERVAL_SECONDS = 30
+
+# Seconds allowed for one connectivity probe, for connect and for read alike.
+# Clamped against the probe interval so two timeouts always fit inside one
+# cycle: a probe must never still be running when the next one is due.
+DEFAULT_PROBE_TIMEOUT_SECONDS = 5
 
 # Seconds to wait before retrying a failed collection, capped at the interval.
 # At a 60 minute interval a single transient failure would otherwise leave the
@@ -79,6 +92,7 @@ def build_s3_client(
     aws_secret_access_key,
     aws_default_region,
     aws_endpoint_url,
+    config=None,
 ):
     """Build the S3 client. Raises so the caller can decide what to do."""
     return boto3.client(
@@ -87,7 +101,103 @@ def build_s3_client(
         endpoint_url=aws_endpoint_url or None,
         aws_access_key_id=aws_access_key_id,
         aws_secret_access_key=aws_secret_access_key,
+        config=config,
     )
+
+
+def probe_timeout_for(configured, interval_seconds):
+    """A whole check has to fit inside the interval it serves.
+
+    Two attempts of connect plus read, so four timeouts: a probe must never
+    still be running when the next one is due.
+    """
+    if not interval_seconds:
+        return int(configured)
+    return max(1, min(int(configured), interval_seconds // 4))
+
+
+def build_probe_client(
+    aws_access_key_id,
+    aws_secret_access_key,
+    aws_default_region,
+    aws_endpoint_url,
+    timeout_seconds,
+):
+    """A client sized for one round trip, not for a long listing.
+
+    The collection client keeps the boto3 defaults, which are right for it: a
+    transient error in the middle of 150 pages should be retried, not fail the
+    hour. A probe wants the opposite.
+    """
+    return build_s3_client(
+        aws_access_key_id,
+        aws_secret_access_key,
+        aws_default_region,
+        aws_endpoint_url,
+        config=Config(
+            connect_timeout=timeout_seconds,
+            read_timeout=timeout_seconds,
+            # No botocore retry at all. Zero and not one, because botocore
+            # counts retries here rather than attempts, so max_attempts=1 would
+            # still permit a second request; this resolves to
+            # total_max_attempts=1.
+            #
+            # The reason is the backoff, not the extra request. Both retry
+            # modes sleep rand(0, 1) seconds before the first retry -- legacy
+            # by way of `"base": "rand"` in _retry.json, and standard the same,
+            # since the cheaper 0.05 scaling in its ExponentialBackoff sits
+            # behind NEW_RETRIES_ENABLED, an internal flag that is off. That
+            # sleep lands inside probe_duration_seconds and is indistinguishable
+            # from real latency. ConnectivityProbe retries once by itself
+            # instead: no sleep, and counted.
+            retries={"max_attempts": 0, "mode": "standard"},
+            # SO_KEEPALIVE on the socket, and nothing more: Linux waits
+            # tcp_keepalive_time -- 7200s out of the box -- before the first
+            # probe packet, so at any sane probe cadence this fires never. It is
+            # set so that lowering that sysctl below the load balancer's idle
+            # timeout takes effect. What keeps the connection warm today is the
+            # probe traffic itself, which is why the interval has to stay under
+            # that timeout -- see DEFAULT_CONNECTIVITY_INTERVAL_SECONDS.
+            tcp_keepalive=True,
+            max_pool_connections=1,
+        ),
+    )
+
+
+def probe_client_for(
+    shared_client,
+    interval_seconds,
+    timeout_seconds,
+    aws_access_key_id,
+    aws_secret_access_key,
+    aws_default_region,
+    aws_endpoint_url,
+):
+    """The probe's own client, or the shared one when there is no probe.
+
+    The probe is auxiliary: a client it cannot build must not stop the exporter
+    from starting, unlike the collection client whose failure is fatal.
+    """
+    if not interval_seconds:
+        return shared_client
+
+    try:
+        client = build_probe_client(
+            aws_access_key_id,
+            aws_secret_access_key,
+            aws_default_region,
+            aws_endpoint_url,
+            timeout_seconds,
+        )
+    except Exception as e:
+        logging.error("Cannot build the probe client, using the shared one: %s", e)
+        return shared_client
+
+    logging.info(
+        "Connectivity probe client: %ss timeout, single attempt, keepalive on",
+        timeout_seconds,
+    )
+    return client
 
 
 def load_configuration(path=CONFIG_PATH):
@@ -104,6 +214,7 @@ def load_configuration(path=CONFIG_PATH):
         "max_failures": DEFAULT_MAX_FAILURES,
         "connectivity_interval": DEFAULT_CONNECTIVITY_INTERVAL_SECONDS,
         "retry_interval": DEFAULT_RETRY_INTERVAL_SECONDS,
+        "probe_timeout": DEFAULT_PROBE_TIMEOUT_SECONDS,
     }
 
     document = {}
@@ -420,6 +531,18 @@ class BucketSizeCollector(object):
                         "Age of the last connectivity probe, in seconds.",
                     ]
                 )
+                # Monotonic, so increase() over it reads as a rate even though
+                # the collector can only emit gauges. This is what makes a
+                # reconnection visible instead of it hiding inside
+                # bucket_probe_duration_seconds as latency.
+                metrics.append(
+                    [
+                        collector_metric_name + ["bucket_probe_retries_total"],
+                        prometheus_labels,
+                        float(self.probe.retries_total),
+                        "Connectivity probe attempts retried since start.",
+                    ]
+                )
 
         except Exception as e:
             logging.error(e)
@@ -551,6 +674,7 @@ def main():
     connectivity_interval = int(settings["connectivity_interval"])
     # A retry must never outlast the interval it is meant to shorten.
     retry_interval = min(int(settings["retry_interval"]), interval * 60)
+    probe_timeout = probe_timeout_for(settings["probe_timeout"], connectivity_interval)
 
     try:
         s3_client = build_s3_client(
@@ -575,7 +699,18 @@ def main():
 
     source = sources.resolve(context, settings["source"])
 
-    probe = ConnectivityProbe(s3_client, s3_bucket_name, connectivity_interval)
+    # Its own client, so the probe's timeout budget never becomes the
+    # collection's.
+    probe_client = probe_client_for(
+        s3_client,
+        connectivity_interval,
+        probe_timeout,
+        aws_access_key_id,
+        aws_secret_access_key,
+        aws_default_region,
+        aws_endpoint_url,
+    )
+    probe = ConnectivityProbe(probe_client, s3_bucket_name, connectivity_interval)
 
     info = Info("webtech_s3_exporter", "Webtech Prometheus Exporter version")
 
@@ -636,8 +771,27 @@ def main():
                     logging.error("Cannot rebuild the S3 client: %s", e)
                 else:
                     source = sources.resolve(context, settings["source"])
-                    probe.set_client(context.client)
                     publish_info(source)
+                    if connectivity_interval:
+                        # Its own try: the source has just been re-resolved
+                        # successfully, and a probe client that fails to build
+                        # must not undo that.
+                        try:
+                            probe.set_client(
+                                build_probe_client(
+                                    aws_access_key_id,
+                                    aws_secret_access_key,
+                                    aws_default_region,
+                                    aws_endpoint_url,
+                                    probe_timeout,
+                                )
+                            )
+                        except Exception as e:
+                            logging.error(
+                                "Cannot rebuild the probe client, keeping the "
+                                "current one: %s",
+                                e,
+                            )
 
         # Retry sooner than the full interval after a failure: at 60 minutes,
         # one transient error would otherwise mean an hour of stale figures.

@@ -21,7 +21,20 @@ configuration:
   # their own clock. One cheap request each, so this can stay frequent even
   # when `interval` is measured in hours. 0 disables the probe and /readyz.
   # Overridable with COLLECTOR_CONNECTIVITY_INTERVAL.
-  - connectivity_interval: 60
+  #
+  # Keep this under the idle timeout of whatever sits in front of the storage
+  # system. Between two collections the probe is the only traffic on its
+  # connection, so this interval is also what keeps that connection alive; set
+  # equal to the idle timeout it lands on the boundary and reconnects on about
+  # every other cycle.
+  - connectivity_interval: 30
+
+  # Seconds allowed for one connectivity probe, for connect and for read alike.
+  # Clamped to a quarter of `connectivity_interval`, so a whole check -- two
+  # attempts of connect plus read -- always fits inside one cycle. botocore
+  # retries are off: its backoff sleeps a random fraction of a second that would
+  # be recorded as latency. The probe retries once itself, immediately.
+  - probe_timeout: 5
 
   # Seconds before retrying a failed collection, capped at `interval`. Without
   # it, one transient failure at a 60 minute interval leaves the figures stale

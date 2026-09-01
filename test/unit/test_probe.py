@@ -75,7 +75,8 @@ def test_a_missing_bucket_is_still_an_outage():
     result = ConnectivityProbe(client, "my-bucket", 60).check_once()
 
     assert result.reachable is False
-    assert client.calls == ["head_bucket"]
+    # Retried once, and never downgraded to the listing.
+    assert client.calls == ["head_bucket", "head_bucket"]
 
 
 def test_each_check_logs_its_round_trip_time(caplog):
@@ -135,7 +136,7 @@ def test_a_real_outage_is_not_mistaken_for_a_permission_problem():
     assert result.reachable is False
     assert "NoSuchBucket" in result.error
     # Never silently downgraded to the listing.
-    assert client.calls == ["head_bucket"]
+    assert client.calls == ["head_bucket", "head_bucket"]
 
 
 def test_unreachable_bucket_reports_the_error():
@@ -165,6 +166,71 @@ def test_rebuilt_client_is_adopted_and_the_method_re_decided():
     probe.check_once()
 
     assert "head_bucket" in second.calls
+
+
+class StaleConnectionClient:
+    """Fails the first call the way a dropped idle socket does, then works."""
+
+    def __init__(self):
+        self.calls = 0
+
+    def head_bucket(self, **kwargs):
+        self.calls += 1
+        if self.calls == 1:
+            raise ConnectionError("Connection aborted, RemoteDisconnected")
+
+
+def test_a_dropped_connection_is_retried_at_once_and_is_not_an_outage():
+    # A load balancer that closes idle connections leaves a dead socket in the
+    # pool. Reopening it costs one connection setup; calling that an outage
+    # would take the pod out of service on a purely local matter.
+    client = StaleConnectionClient()
+    probe = ConnectivityProbe(client, "my-bucket", 30)
+
+    result = probe.check_once()
+
+    assert result.reachable is True
+    assert result.attempts == 2
+    assert client.calls == 2
+
+
+def test_a_healthy_check_does_not_retry():
+    probe = ConnectivityProbe(FakeClient(), "my-bucket", 30)
+
+    result = probe.check_once()
+
+    assert result.attempts == 1
+    assert probe.retries_total == 0
+
+
+def test_retries_are_counted_so_a_reconnection_is_visible():
+    # The whole point of retrying here rather than in botocore: its backoff
+    # would hide inside probe_duration_seconds as latency.
+    probe = ConnectivityProbe(StaleConnectionClient(), "my-bucket", 30)
+    probe.check_once()
+
+    assert probe.retries_total == 1
+
+
+def test_a_sustained_outage_gives_up_after_the_second_attempt():
+    client = FakeClient(head_error=ConnectionError("connection refused"))
+    probe = ConnectivityProbe(client, "my-bucket", 30)
+
+    result = probe.check_once()
+
+    assert result.reachable is False
+    assert result.attempts == 2
+
+
+def test_the_retry_counter_survives_a_client_rebuild():
+    # It is monotonic on purpose: a counter that went backwards would break
+    # increase() over it.
+    probe = ConnectivityProbe(StaleConnectionClient(), "my-bucket", 30)
+    probe.check_once()
+    probe.set_client(StaleConnectionClient())
+    probe.check_once()
+
+    assert probe.retries_total == 2
 
 
 def test_age_is_zero_before_the_first_probe():

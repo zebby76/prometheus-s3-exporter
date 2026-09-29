@@ -323,7 +323,7 @@ make test    # full stack, asserts the exposed metrics, then tears down
 ## Local development
 
 ```bash
-make up      # exporter + MinIO, bucket preloaded from test/assets
+make up      # exporter + SeaweedFS (S3), bucket preloaded from test/assets
 make logs
 make down
 ```

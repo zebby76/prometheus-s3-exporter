@@ -5,10 +5,10 @@ services:
     restart: unless-stopped
     environment:
       - OPENSHIFT_NAMESPACE=default-namespace
-      - AWS_ACCESS_KEY_ID=minioadmin
-      - AWS_SECRET_ACCESS_KEY=minioadmin
+      - AWS_ACCESS_KEY_ID=s3admin
+      - AWS_SECRET_ACCESS_KEY=s3admin-secret
       - AWS_DEFAULT_REGION=us-east-1
-      - AWS_ENDPOINT_URL=http://minio:9000
+      - AWS_ENDPOINT_URL=http://seaweedfs:8333
       - S3_BUCKET_NAME=my-bucket
     user: "1001:0"
     ports:
@@ -17,7 +17,7 @@ services:
     volumes:
       - ./config/collector.yml:/app/config/collector.yml
     depends_on:
-      minio:
+      seaweedfs:
         condition: service_healthy
     healthcheck:
       test:
@@ -30,24 +30,28 @@ services:
       start_period: 5s
     mem_limit: 64m
 
-  minio:
-    image: docker.io/minio/minio:latest
-    container_name: minio
+  # S3 storage for local runs and the smoke test. SeaweedFS replaced MinIO,
+  # whose images can no longer be pulled. It creates an admin identity from
+  # AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY: requests signed with any other key,
+  # or unsigned, are refused. The `minio` usage source has nothing to read here,
+  # so `auto` settles on the listing, as it did with MinIO unless sources.minio
+  # was filled in.
+  seaweedfs:
+    image: docker.io/chrislusf/seaweedfs:4.47
+    container_name: seaweedfs
     environment:
-      - MINIO_ROOT_USER=minioadmin
-      - MINIO_ROOT_PASSWORD=minioadmin
-      # Lets the `minio` usage source be tried by hand against this stack; the
-      # endpoint answers 403 without it. Dev fixture only.
-      - MINIO_PROMETHEUS_AUTH_TYPE=public
+      - AWS_ACCESS_KEY_ID=s3admin
+      - AWS_SECRET_ACCESS_KEY=s3admin-secret
     volumes:
-      - minio-data:/data
-    command: server /data --console-address ":9001"
+      - seaweedfs-data:/data
+    command: server -dir=/data -s3 -ip.bind=0.0.0.0
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      # /status on the S3 port answers once the gateway serves requests.
+      test: ["CMD-SHELL", "curl -sf -o /dev/null http://localhost:8333/status"]
       interval: 5s
       timeout: 5s
       retries: 12
     mem_limit: 512m
 
 volumes:
-  minio-data:
+  seaweedfs-data:

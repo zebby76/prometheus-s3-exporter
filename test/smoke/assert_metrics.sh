@@ -119,12 +119,12 @@ assert_equals "${READY_URL} (bucket up)" "$(status_of "${READY_URL}")" 200
 
 # The interesting half: connectivity has to be reported independently of the
 # collection, which at a production interval may be an hour old.
-echo "Cutting MinIO off to exercise the probe..."
-docker compose stop minio >/dev/null 2>&1
+echo "Cutting the S3 storage off to exercise the probe..."
+docker compose stop seaweedfs >/dev/null 2>&1
 
 if ! wait_for_status "${READY_URL}" 503 $((PROBE_INTERVAL * 6 + 20)); then
 	echo "FAIL: ${READY_URL} never reported 503 with the bucket down" >&2
-	docker compose start minio >/dev/null 2>&1
+	docker compose start seaweedfs >/dev/null 2>&1
 	exit 1
 fi
 printf 'ok: %-40s %s\n' "${READY_URL} (bucket down)" "503"
@@ -138,10 +138,10 @@ assert_equals "webtech_s3_bucket_size_bytes (down)" \
 # Liveness must stay green: restarting the pod would not fix S3.
 assert_equals "${HEALTH_URL} (bucket down)" "$(status_of "${HEALTH_URL}")" 200
 
-echo "Bringing MinIO back..."
-docker compose start minio >/dev/null 2>&1
+echo "Bringing the S3 storage back..."
+docker compose start seaweedfs >/dev/null 2>&1
 if ! wait_for_status "${READY_URL}" 200 $((PROBE_INTERVAL * 6 + 40)); then
-	echo "FAIL: ${READY_URL} never recovered after MinIO came back" >&2
+	echo "FAIL: ${READY_URL} never recovered after the S3 storage came back" >&2
 	exit 1
 fi
 printf 'ok: %-40s %s\n' "${READY_URL} (recovered)" "200"

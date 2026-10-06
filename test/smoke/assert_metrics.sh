@@ -117,6 +117,15 @@ wait_for_status() {
 
 assert_equals "${READY_URL} (bucket up)" "$(status_of "${READY_URL}")" 200
 
+# One client that connects and sends nothing must not hold the others up. The
+# listeners used to serve one request at a time, with no timeout: a port scan
+# or a TCP-only check blocked /healthz until the liveness probe restarted the pod.
+health_hostport="${HEALTH_URL#*://}"
+health_hostport="${health_hostport%%/*}"
+exec 3<>"/dev/tcp/${health_hostport%:*}/${health_hostport##*:}"
+assert_equals "${HEALTH_URL} (idle client open)" "$(status_of "${HEALTH_URL}")" 200
+exec 3<&-
+
 # The interesting half: connectivity has to be reported independently of the
 # collection, which at a production interval may be an hour old.
 echo "Cutting the S3 storage off to exercise the probe..."

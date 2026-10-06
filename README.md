@@ -192,6 +192,10 @@ The two endpoints answer different questions:
 Set `connectivity_interval: 0` to switch the probe off entirely: no thread, no
 requests, no probe metrics, and `/readyz` is not routed.
 
+Both listeners, `:9773` and `:9774`, serve each connection on a thread of its
+own and drop one that sends nothing for 10 seconds. A port scan or a TCP-only
+check holding a connection open therefore never delays `/healthz` or a scrape.
+
 ## Access logs
 
 Requests are logged as logfmt on the same key set a reverse proxy tier emits, so

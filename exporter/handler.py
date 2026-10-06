@@ -1,5 +1,6 @@
 import json
 import logging
+import socketserver
 import threading
 import time
 import uuid
@@ -38,6 +39,13 @@ DEFAULT_PROXY_HEADERS = {
 # Apache renders a missing header or note as a bare dash; keep that so both
 # tiers can be read by one parser without special cases.
 _ABSENT = "-"
+
+# Seconds a connection may sit without sending anything before it is dropped.
+# Each connection has a thread of its own (ThreadingWSGIServer), so a silent
+# client no longer holds anyone else up; this is what keeps a burst of them
+# from piling up threads. Well above what a scrape or a probe needs to send a
+# request line.
+CONNECTION_TIMEOUT_SECONDS = 10
 
 
 def _quote(value):
@@ -91,6 +99,9 @@ class LogfmtRequestHandler(simple_server.WSGIRequestHandler):
     # Set once at startup by set_proxy_headers(); a class attribute because
     # wsgiref instantiates the handler itself, once per request.
     proxy_headers = DEFAULT_PROXY_HEADERS
+
+    # Read by socketserver.StreamRequestHandler.setup() as the socket timeout.
+    timeout = CONNECTION_TIMEOUT_SECONDS
 
     def get_environ(self):
         # Called once per request, immediately before the app runs, so it
@@ -226,33 +237,47 @@ class CustomMetricsHandler:
         resp.text = output
 
 
+class ThreadingWSGIServer(socketserver.ThreadingMixIn, simple_server.WSGIServer):
+    """One thread per connection.
+
+    wsgiref's server answers one request at a time, with no timeout: a single
+    client that connected and sent nothing -- a port scan, a TCP-only load
+    balancer check -- held every other request until it left. On the health
+    port that meant the liveness probe timing out and the pod restarted, losing
+    the very metrics /healthz exists to protect.
+    """
+
+    # A stuck connection must not keep the process alive at shutdown.
+    daemon_threads = True
+
+
+def _serve(api, addr, port, name):
+    """Start a threaded server for `api` in the background and return it."""
+    _access_logger()
+    httpd = simple_server.make_server(
+        addr,
+        port,
+        api,
+        server_class=ThreadingWSGIServer,
+        handler_class=LogfmtRequestHandler,
+    )
+    thread = threading.Thread(target=httpd.serve_forever, name=name, daemon=True)
+    thread.start()
+    return httpd
+
+
 def exporter(port=9773, addr="0.0.0.0"):
-
-    global LOGGER
-
-    logging.basicConfig(level=logging.DEBUG)
-    LOGGER = logging.getLogger(__name__)
-
+    """Serve /metrics; returns the server, whose port is server_port."""
     api = falcon.App()
     api.add_route("/metrics", CustomMetricsHandler())
 
-    _access_logger()
-    httpd = simple_server.make_server(
-        addr, port, api, handler_class=LogfmtRequestHandler
-    )
-    t = threading.Thread(target=httpd.serve_forever)
-    t.daemon = True
-    LOGGER.debug("Start Prometheus Exporter Listener on %s:%s/metrics ", addr, port)
-    t.start()
+    httpd = _serve(api, addr, port, "metrics-listener")
+    logging.debug("Start Prometheus Exporter Listener on %s:%s/metrics", addr, port)
+    return httpd
 
 
 def health(port=9774, addr="0.0.0.0", probe=None):
-
-    global LOGGER
-
-    logging.basicConfig(level=logging.DEBUG)
-    LOGGER = logging.getLogger(__name__)
-
+    """Serve /healthz (and /readyz with a probe); returns the server."""
     api = falcon.App()
     api.add_route("/healthz", HealthMetricsHandler())
     # Only routed when a probe exists: without one there is nothing to base a
@@ -260,13 +285,8 @@ def health(port=9774, addr="0.0.0.0", probe=None):
     if probe is not None:
         api.add_route("/readyz", ReadinessHandler(probe))
 
-    _access_logger()
-    httpd = simple_server.make_server(
-        addr, port, api, handler_class=LogfmtRequestHandler
+    httpd = _serve(api, addr, port, "health-listener")
+    logging.debug(
+        "Start Prometheus Exporter Health Listener on %s:%s/healthz", addr, port
     )
-    t = threading.Thread(target=httpd.serve_forever)
-    t.daemon = True
-    LOGGER.debug(
-        "Start Prometheus Exporter Health Listener on %s:%s/healthz ", addr, port
-    )
-    t.start()
+    return httpd

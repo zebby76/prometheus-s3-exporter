@@ -54,7 +54,12 @@ SERVICE                     ?=
 build: ## build [ options ]
 	@$(MAKE) _docker-bake/default
 
-test: ## test : start the stack health-gated, assert the exposed metrics, then tear it down
+# The smoke test runs the prd image, the one CI publishes: compose.prod.yaml
+# overrides the dev target compose.override.yaml builds for local work. Exported,
+# so the sub-makes and the smoke script's own `docker compose` calls see the
+# same files.
+test: export COMPOSE_FILE = compose.yaml:compose.override.yaml:compose.prod.yaml
+test: ## test : start the stack health-gated with the prd image, assert the exposed metrics, then tear it down
 	@# Start from a clean volume: fixtures left by an interrupted run would be
 	@# counted alongside test/assets and fail the assertions.
 	@$(MAKE) down
@@ -69,6 +74,7 @@ lint: ## lint : run super-linter locally over the whole codebase
 	@# -it only when there is a terminal, so the target stays scriptable.
 	@docker run --rm $$([ -t 0 ] && echo -it) \
 		-e RUN_LOCAL=true \
+		-e DEFAULT_BRANCH=main \
 		-e VALIDATE_ALL_CODEBASE=true \
 		-e LINTER_RULES_PATH=/ \
 		-e IGNORE_GITIGNORED_FILES=true \
@@ -105,7 +111,7 @@ _assert-metrics:
 
 _docker-bake/%:
 	@echo "\n-- Running Docker bake --\n"
-	@docker bake --progress=plain \
+	@docker buildx bake --progress=plain \
 		--set *.platform=${DOCKER_PLATFORM} \
 		--set *.output=${DOCKER_OUTPUT} \
 		--builder ${DOCKER_BUILDER} \
@@ -165,8 +171,23 @@ release: ## release VERSION=x.y.z : prepare commit + signed tag + push + GitHub 
 	@[ -n "$(VERSION)" ] || { echo "VERSION=x.y.z required" >&2; exit 1; }
 	@b=$$(git rev-parse --abbrev-ref HEAD); case "$$b" in main|[0-9]*.[0-9]*) ;; *) echo "release only from main or x.y (on $$b)" >&2; exit 1;; esac
 	@git rev-parse "$(VERSION)" >/dev/null 2>&1 && { echo "tag $(VERSION) already exists -> use 'make retag VERSION=$(VERSION)'" >&2; exit 1; } || true
+	@# `git commit -a` stages tracked files only, so a new file that was never added
+	@# would be released without ever being committed. --exclude-standard honours
+	@# .git/info/exclude, so a deliberately untracked file does not trip this.
+	@u=$$(git ls-files --others --exclude-standard); [ -z "$$u" ] || { \
+		echo "untracked files present -- 'git commit -a' would SKIP them:" >&2; \
+		echo "$$u" | sed 's/^/  /' >&2; \
+		echo "git add them (or exclude them) before releasing" >&2; exit 1; }
 	@if [ -z "$(YES)" ]; then printf "Release $(VERSION) from $$(git rev-parse --abbrev-ref HEAD) to $(RELEASE_REMOTE) ($(REPO))? [y/N] "; read a; [ "$$a" = y ] || [ "$$a" = Y ] || { echo Aborted >&2; exit 1; }; fi
-	@git commit -S -a -m "chore: prepare release $(VERSION)" || echo "No changes to commit."
+	@# Only a genuinely clean tree may skip the commit. `git commit ... || echo` used
+	@# to swallow every failure: a locked GPG agent made the signature fail, printed
+	@# "No changes to commit", and the target carried on to tag a tree with no release
+	@# commit in it. Measured: the old form exits 0 on a signing failure, this one 128.
+	@if [ -n "$$(git status --porcelain --untracked-files=no)" ]; then \
+		git commit -S -a -m "chore: prepare release $(VERSION)"; \
+	else \
+		echo "Nothing to commit -- tagging the current HEAD."; \
+	fi
 	@git tag -s -m "Version $(VERSION)" $(VERSION)
 	@b=$$(git rev-parse --abbrev-ref HEAD); \
 	 git push $(RELEASE_REMOTE) $$b; \

@@ -313,12 +313,18 @@ rather than globally.
 make build
 ```
 
+The image is `python:3.12-slim` on Debian 13 (`REL` in `docker-bake.hcl`). The exporter and its
+dependencies live in a virtualenv, `/opt/venv`; the image carries no pip.
+
 ## Test
 
 ```bash
-make unit    # unit tests, no containers
-make test    # full stack, asserts the exposed metrics, then tears down
+make unit    # unit tests, no containers (Python 3.12, `pip install -e '.[dev]'`)
+make test    # full stack with the prd image, asserts the exposed metrics, then tears down
 ```
+
+CI runs both before it publishes anything. `make test` builds the **prd** image, the one that is
+published; `make up` keeps the dev image, which adds `curl` and `awscli` for local work.
 
 ## Local development
 

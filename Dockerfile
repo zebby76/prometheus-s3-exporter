@@ -2,7 +2,7 @@
 
 ARG REL_ARG
 
-FROM python:3.12-slim-${REL_ARG:-bookworm} AS base
+FROM python:3.12-slim-${REL_ARG:-trixie} AS base
 
 WORKDIR /app
 
@@ -13,19 +13,28 @@ FROM base AS builder
 
 COPY . /app
 
+# The exporter and its dependencies go into a virtualenv with no pip of its own;
+# the base image's pip installs into it. The prd stage copies the virtualenv
+# alone. Copying site-packages over the base image's instead left two pip
+# installs mixed together in the image -- and pip, which nothing runs, carried
+# the image's Python vulnerability findings in its vendored libraries.
+# git: versioneer derives the version from the tags.
 RUN --mount=type=cache,target=/root/.cache/pip \
     apt-get -y update ; \
     apt-get -y install --no-install-recommends git ; \
-    pip install --upgrade pip setuptools wheel ; \
-    pip install .
+    python -m venv --without-pip /opt/venv ; \
+    pip --python /opt/venv/bin/python install .
 
 FROM base AS prd
 
-COPY --from=builder /usr/local/lib/python3.12/site-packages /usr/local/lib/python3.12/site-packages
-COPY --from=builder /usr/local/bin/exporter /usr/local/bin/exporter
+COPY --from=builder /opt/venv /opt/venv
 COPY config/ /app/config/
 
-RUN addgroup --gid 1001 default ; \
+ENV PATH=/opt/venv/bin:${PATH}
+
+# Not needed at runtime: the base image's pip only adds what a scanner reports.
+RUN /usr/local/bin/python3 -m pip uninstall --yes --root-user-action=ignore pip ; \
+    addgroup --gid 1001 default ; \
     adduser --system --uid 1001 --gid 1001 --disabled-login --no-create-home default ;
 
 USER default
@@ -33,7 +42,7 @@ USER default
 EXPOSE 9773/tcp
 EXPOSE 9774/tcp
 
-ENTRYPOINT ["python3", "-u", "/usr/local/bin/exporter"]
+ENTRYPOINT ["python3", "-u", "/opt/venv/bin/exporter"]
 
 # python3 rather than curl: curl is only installed in the dev stage, so the
 # production image reported unhealthy forever.

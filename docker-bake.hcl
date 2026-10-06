@@ -3,7 +3,7 @@ group "default" {
 }
 
 variable "REL" {
-  default = "bookworm"
+  default = "trixie"
 }
 
 variable "DOCKER_IMAGE_NAME" {

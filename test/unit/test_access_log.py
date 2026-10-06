@@ -218,3 +218,21 @@ def test_a_useless_configuration_falls_back_to_the_defaults(configured):
     set_proxy_headers(configured)
 
     assert LogfmtRequestHandler.proxy_headers == DEFAULT_PROXY_HEADERS
+
+
+def test_a_header_cannot_add_keys_to_the_line(access_lines):
+    # Unquoted, this request id added a status and a src of its own, ahead of
+    # the real ones: a parser keeping the first occurrence believed them.
+    handler = request(
+        headers={"X-Request-Id": "abc status=500 src=admin", "Via": "proxy class=x"}
+    )
+    # As get_environ() does for a real request.
+    handler._rid = handler._request_id()
+    handler.log_request(200, 16)
+    keys = [pair.split("=", 1)[0] for pair in shlex.split(access_lines[0])]
+    fields = parse(access_lines[0])
+
+    assert keys.count("status") == 1 and keys.count("src") == 1
+    assert fields["rid"] == "abc status=500 src=admin"
+    assert fields["via"] == "proxy class=x"
+    assert fields["status"] == "200"

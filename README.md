@@ -83,7 +83,6 @@ mounted ConfigMap.
 | Metric | Meaning |
 | --- | --- |
 | `webtech_s3_bucket_size_bytes` | bucket size in bytes |
-| `webtech_s3_bucket_size_kbytes` | **deprecated**, removed at the next major |
 | `webtech_s3_bucket_count_total` | number of objects |
 | `webtech_s3_usage_stale_seconds` | age of the figures being served |
 | `webtech_s3_collect_duration_seconds` | duration of the last collection |
@@ -219,11 +218,14 @@ one parser reads both tiers and a request can be followed across them on `vxid`
 and `via`:
 
 ```text
-ts=2026-08-31T18:57:03.720+0000 rid=4285d115ed6745bd class=health src=exporter \
+ts=2026-08-31T18:57:03.720+0000 rid="4285d115ed6745bd" class=health src=exporter \
 status=200 dur_us=468 method=GET uri="/readyz" qs="-" target="/readyz" bytes=37 \
-host=exporter:9774 via=apache vxid=987654 xff="10.0.0.1" proto=https \
+host="exporter:9774" via="apache" vxid="987654" xff="10.0.0.1" proto="https" \
 ua="kube-probe/1.29"
 ```
+
+Every value a client sends is quoted, so a header cannot add keys of its own to
+the line.
 
 | Key | Value |
 | --- | --- |
@@ -314,15 +316,16 @@ the number of bytes: a 74 GB bucket holding 1360 objects is cheaper to measure
 than a 2 GB one holding 150 000. Budget roughly one request per 1000 objects and
 86 us of parsing per object, plus one round-trip per request.
 
-| Objects | Requests | Collection | Share of a 1 min interval |
+| Objects | Requests | Collection | Share of the default 5 min interval |
 | --- | --- | --- | --- |
-| 1 000 | 1 | 0.1 s | 0.2 % |
-| 10 000 | 10 | 0.9 s | 1.5 % |
-| 150 000 | 150 | ~16 s | 27 % |
-| 700 000 | 700 | ~60 s | 100 % |
+| 1 000 | 1 | 0.1 s | 0.03 % |
+| 10 000 | 10 | 0.9 s | 0.3 % |
+| 150 000 | 150 | ~16 s | 5 % |
+| 700 000 | 700 | ~60 s | 20 % |
 
-Past roughly a quarter of the interval the exporter logs a warning on every
-cycle. Raising `interval` is almost always the right answer: a bucket size is a
+`interval` is in minutes, defaults to 5, and must be above 0: the exporter refuses
+to start otherwise (so does `retry_interval`). Past roughly a quarter of the
+interval the exporter logs a warning on every cycle. Raising `interval` is almost always the right answer: a bucket size is a
 capacity figure, and few dashboards need it fresher than every 5 to 15 minutes.
 Each deployment watches a single bucket, so the interval can be tuned per bucket
 rather than globally.

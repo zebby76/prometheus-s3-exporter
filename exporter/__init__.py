@@ -43,7 +43,9 @@ label_start_double_under = re.compile(r"^__+")
 
 CONFIG_PATH = os.getenv("COLLECTOR_CONFIG", "config/collector.yml")
 
-DEFAULT_INTERVAL_MINUTES = 1
+# Minutes between two collections. A bucket size is a capacity figure: few
+# dashboards need it fresher, and the listing source pays for every cycle.
+DEFAULT_INTERVAL_MINUTES = 5
 # Consecutive fetch failures after which the source is re-detected. Without
 # this, a provider that is briefly unreachable at startup would pin the
 # exporter to the listing fallback until someone restarts the pod.
@@ -405,7 +407,7 @@ class BucketSizeCollector(object):
         # instead of raising NameError inside the error handler.
         collector_metric_name = ["webtech_s3"]
         up_metric_name = collector_metric_name + ["exporter"]
-        up_metric_description = "Did the 'Webtech S3' Prometheus Exporter Up & Running."
+        up_metric_description = "1 when the exporter could render its metrics."
 
         try:
             # Read once: the collection thread may swap it under us.
@@ -426,7 +428,7 @@ class BucketSizeCollector(object):
 
             state_metric_name = collector_metric_name + ["exporter", "status"]
             state_metric_description = (
-                "Did the 'Webtech S3' specific Openshift Resource push succeed."
+                "1 when the last collection of the bucket usage succeeded."
             )
 
             metrics.append(
@@ -447,23 +449,6 @@ class BucketSizeCollector(object):
                     prometheus_labels,
                     int(usage.size_bytes),
                     size_metric_description,
-                ]
-            )
-
-            # Kept for one release so existing dashboards and alerts keep
-            # working; drop it at the next major together with this comment.
-            legacy_size_metric_name = collector_metric_name + ["bucket_size_kbytes"]
-            legacy_size_metric_description = (
-                "DEPRECATED, use webtech_s3_bucket_size_bytes. "
-                "Size of S3 bucket in kbytes."
-            )
-
-            metrics.append(
-                [
-                    legacy_size_metric_name,
-                    prometheus_labels,
-                    int(usage.size_bytes / 1000),
-                    legacy_size_metric_description,
                 ]
             )
 
@@ -633,6 +618,29 @@ def collect_once(
     return True
 
 
+def positive_number(settings, key, unit):
+    """Read a setting that must be a number above zero, or stop the exporter.
+
+    An `interval` of 0 used to mean no wait at all between two collections:
+    measured, about 200 collections a second against the storage. A setting
+    that cannot be honoured stops the start, loudly, rather than being guessed.
+    """
+    value = settings.get(key)
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        number = 0.0
+    if not number > 0:
+        logging.error(
+            "Configuration '%s' must be a number of %s above 0, got %r",
+            key,
+            unit,
+            value,
+        )
+        sys.exit(1)
+    return number
+
+
 def require_env(name):
     value = os.getenv(name, "")
     if not value:
@@ -650,7 +658,7 @@ def main():
     signal.signal(signal.SIGINT, signal_handler)
 
     parser = argparse.ArgumentParser(
-        description="Export Openshift Object Definitions metrics to Prometheus."
+        description="Export the size and object count of an S3 bucket to Prometheus."
     )
     parser.add_argument(
         "--log-level",
@@ -687,11 +695,13 @@ def main():
     aws_endpoint_url = os.getenv("AWS_ENDPOINT_URL", "")
 
     settings = load_configuration()
-    interval = settings["interval"]
+    interval = positive_number(settings, "interval", "minutes")
     max_failures = int(settings["max_failures"])
     connectivity_interval = int(settings["connectivity_interval"])
     # A retry must never outlast the interval it is meant to shorten.
-    retry_interval = min(int(settings["retry_interval"]), interval * 60)
+    retry_interval = min(
+        positive_number(settings, "retry_interval", "seconds"), interval * 60
+    )
     probe_timeout = probe_timeout_for(settings["probe_timeout"], connectivity_interval)
     redetect_interval = int(settings["redetect_interval"])
 

@@ -132,9 +132,12 @@ class LogfmtRequestHandler(simple_server.WSGIRequestHandler):
         target, _, query = self.path.partition("?")
         proxy = self.proxy_headers
 
+        # Every value a client can send is quoted: unquoted, a header such as
+        # `X-Request-Id: abc status=500 src=admin` added keys of its own to the
+        # line, and a parser keeping the first occurrence believed them.
         fields = [
             ("ts", self._timestamp(), False),
-            ("rid", getattr(self, "_rid", _ABSENT), False),
+            ("rid", getattr(self, "_rid", _ABSENT), True),
             ("class", _TRAFFIC_CLASSES.get(target, "other"), False),
             ("src", "exporter", False),
             ("status", code, False),
@@ -145,11 +148,11 @@ class LogfmtRequestHandler(simple_server.WSGIRequestHandler):
             ("target", target or _ABSENT, True),
             # Apache's %B is 0 for an empty body, where wsgiref passes "-".
             ("bytes", 0 if size == "-" else size, False),
-            ("host", self._header("Host"), False),
-            ("via", self._header(proxy["via"]), False),
-            ("vxid", self._header(proxy["vxid"]), False),
+            ("host", self._header("Host"), True),
+            ("via", self._header(proxy["via"]), True),
+            ("vxid", self._header(proxy["vxid"]), True),
             ("xff", self._header(proxy["xff"]), True),
-            ("proto", self._header(proxy["proto"]), False),
+            ("proto", self._header(proxy["proto"]), True),
             ("ua", self._header("User-agent"), True),
         ]
 

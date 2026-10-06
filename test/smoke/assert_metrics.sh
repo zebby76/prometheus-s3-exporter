@@ -17,8 +17,6 @@ PROBE_INTERVAL="${PROBE_INTERVAL:-5}"
 
 EXPECTED_COUNT=5
 EXPECTED_BYTES=4446391
-# The deprecated gauge divides by 1000 and truncates.
-EXPECTED_KBYTES=4446
 
 TIMEOUT_SECONDS="${TIMEOUT_SECONDS:-90}"
 
@@ -78,13 +76,17 @@ fetch
 
 assert_equals webtech_s3_bucket_count_total "$(value_of webtech_s3_bucket_count_total)" "${EXPECTED_COUNT}"
 assert_equals webtech_s3_bucket_size_bytes "$(value_of webtech_s3_bucket_size_bytes)" "${EXPECTED_BYTES}"
-# Kept until the next major so existing dashboards survive the rename.
-assert_equals webtech_s3_bucket_size_kbytes "$(value_of webtech_s3_bucket_size_kbytes)" "${EXPECTED_KBYTES}"
+# Deprecated in 3.2.0, removed in 5.0.0.
+if [[ -n $(value_of webtech_s3_bucket_size_kbytes) ]]; then
+	echo "FAIL: webtech_s3_bucket_size_kbytes is still exposed" >&2
+	exit 1
+fi
 assert_equals webtech_s3_exporter_up "$(value_of webtech_s3_exporter_up)" 1
 assert_equals webtech_s3_exporter_status "$(value_of webtech_s3_exporter_status)" 1
 assert_present webtech_s3_usage_stale_seconds
 assert_present webtech_s3_collect_duration_seconds
-assert_equals webtech_s3_collect_interval_seconds "$(value_of webtech_s3_collect_interval_seconds)" 60
+# The shipped collector.yml collects every 5 minutes.
+assert_equals webtech_s3_collect_interval_seconds "$(value_of webtech_s3_collect_interval_seconds)" 300
 assert_equals webtech_s3_bucket_reachable "$(value_of webtech_s3_bucket_reachable)" 1
 assert_present webtech_s3_bucket_probe_duration_seconds
 assert_present webtech_s3_bucket_probe_age_seconds

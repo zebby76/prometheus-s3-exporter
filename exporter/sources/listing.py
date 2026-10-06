@@ -2,8 +2,9 @@
 
 This is the only source that works against any S3 implementation, because it
 uses nothing but ListObjectsV2. It is also the only one whose cost grows with
-the bucket: one request per thousand keys, and — measured at roughly 71 us per
-object — a wall-clock time dominated by parsing rather than by the network.
+the bucket: one request per thousand keys, and -- about 86 us per object, the
+figure the README sizes with -- a wall-clock time dominated by parsing rather
+than by the network.
 """
 
 from __future__ import annotations

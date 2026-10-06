@@ -1,8 +1,10 @@
 ---
 kind: PrometheusExporterConfig
 configuration:
-  # Minutes between two collections.
-  - interval: 1
+  # Minutes between two collections, above 0. A bucket size is a capacity
+  # figure; with the `list` source every cycle costs one request per 1000
+  # objects -- see "Sizing the interval" in the README.
+  - interval: 5
 
   # Where the usage figures come from.
   #   auto        detect at startup: storagegrid, minio, cloudwatch, r2, then list

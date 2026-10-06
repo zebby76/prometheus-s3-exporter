@@ -14,8 +14,15 @@ configuration:
   # Overridable at runtime with the COLLECTOR_SOURCE environment variable.
   - source: auto
 
-  # Consecutive collection failures before the source is detected again.
+  # Consecutive collection failures before the source is detected again --
+  # except while the connectivity probe says the bucket is unreachable: then
+  # the storage is down, not the source, and the source is kept.
   - max_failures: 3
+
+  # Seconds between two detection attempts while running on the listing
+  # fallback (`list` when something cheaper was asked for), so that a drop to
+  # the listing is never permanent. 0 disables it.
+  - redetect_interval: 3600
 
   # Seconds between two bucket reachability probes, on their own thread and
   # their own clock. One cheap request each, so this can stay frequent even

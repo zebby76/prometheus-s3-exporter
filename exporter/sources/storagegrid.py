@@ -19,7 +19,13 @@ from botocore.auth import S3SigV4Auth
 from botocore.awsrequest import AWSRequest
 from botocore.credentials import Credentials
 
-from .base import SourceContext, SourceUnavailable, Usage, UsageSource
+from .base import (
+    SourceContext,
+    SourceUnavailable,
+    Usage,
+    UsageSource,
+    s3_endpoint_verify,
+)
 
 # Present in every usage payload; its absence means the query parameter was
 # ignored and we are talking to something that is not StorageGRID.
@@ -109,6 +115,7 @@ class StorageGridSource(UsageSource):
             headers=dict(signed.headers),
             timeout=self._timeout,
             stream=True,
+            verify=s3_endpoint_verify(),
         )
 
     @classmethod
@@ -117,7 +124,9 @@ class StorageGridSource(UsageSource):
         try:
             candidate.fetch()
         except Exception as exc:
-            logging.debug("StorageGRID usage extension unavailable: %s", exc)
+            # Info, not debug: when the grid has the extension, this line is the
+            # only trace of why detection moved on to the listing.
+            logging.info("StorageGRID usage extension unavailable: %s", exc)
             return None
         return candidate
 

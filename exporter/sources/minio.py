@@ -17,7 +17,13 @@ from typing import Optional
 
 import requests
 
-from .base import SourceContext, SourceUnavailable, Usage, UsageSource
+from .base import (
+    SourceContext,
+    SourceUnavailable,
+    Usage,
+    UsageSource,
+    s3_endpoint_verify,
+)
 
 # name{label="value",...} 1.234e+05
 _SAMPLE = re.compile(
@@ -139,14 +145,18 @@ class MinioSource(UsageSource):
         try:
             candidate.fetch()
         except Exception as exc:
-            logging.debug("MinIO usage metrics unavailable: %s", exc)
+            # Configured, yet failing: worth more than a debug line.
+            logging.warning("MinIO usage metrics unavailable: %s", exc)
             return None
         return candidate
 
     def fetch(self) -> Usage:
         try:
             response = requests.get(
-                self._url, headers=self._headers, timeout=self._timeout
+                self._url,
+                headers=self._headers,
+                timeout=self._timeout,
+                verify=s3_endpoint_verify(),
             )
         except requests.RequestException as exc:
             raise SourceUnavailable(f"metrics request failed: {exc}") from exc

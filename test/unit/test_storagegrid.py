@@ -100,3 +100,54 @@ def test_a_listing_body_would_never_parse_as_usage():
     # Belt and braces: even if the content type lied, the payload is rejected.
     with pytest.raises(SourceUnavailable):
         parse_usage(LISTING_INSTEAD_OF_USAGE, "bucket")
+
+
+class _Response:
+    status_code = 200
+    headers = {"Content-Type": "application/json"}
+
+    def json(self):
+        return BUCKET_SCOPED
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+@pytest.mark.parametrize(
+    "bundle, expected", [("/etc/ssl/grid-ca.pem", "/etc/ssl/grid-ca.pem"), (None, True)]
+)
+def test_the_usage_request_verifies_tls_like_the_s3_client(
+    monkeypatch, bundle, expected
+):
+    # boto3 trusts AWS_CA_BUNDLE for the S3 calls; the extension lives on the
+    # same server, so it has to trust the same CA.
+    from exporter.sources import storagegrid
+    from exporter.sources.base import SourceContext
+
+    if bundle:
+        monkeypatch.setenv("AWS_CA_BUNDLE", bundle)
+    else:
+        monkeypatch.delenv("AWS_CA_BUNDLE", raising=False)
+
+    seen = {}
+
+    def fake_get(url, **kwargs):
+        seen.update(kwargs)
+        return _Response()
+
+    monkeypatch.setattr(storagegrid.requests, "get", fake_get)
+    ctx = SourceContext(
+        endpoint_url="https://grid.example",
+        region="us-east-1",
+        bucket="my-bucket",
+        access_key="ak",
+        secret_key="sk",
+        client=None,
+    )
+    usage = storagegrid.StorageGridSource(ctx).fetch()
+
+    assert usage.object_count == 5
+    assert seen["verify"] == expected

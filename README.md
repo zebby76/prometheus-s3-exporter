@@ -55,9 +55,25 @@ you need the truth at the moment you look at it is better left on `list`.
 
 The source in use is published as a label on `webtech_s3_exporter_info`, so a
 fallback stays visible in Prometheus rather than hiding in the configuration.
-After `max_failures` consecutive failures the source is detected again, so a
-provider that was briefly unreachable at startup does not pin the exporter to
-the listing until the next restart.
+Detection runs again in two cases, and neither can leave the exporter on the
+listing for good:
+
+- **After `max_failures` consecutive failures** — unless the connectivity probe
+  says the bucket is unreachable. Then the storage is down, not the source, and
+  detecting during the outage would only pick the listing, the one source whose
+  probe checks nothing; the source is kept until the storage is back.
+- **Every `redetect_interval` seconds (default 3600) while on the listing
+  fallback** — that is, on `list` although `auto` or another source was asked
+  for. Whatever brought it there (a start during an outage, an extension
+  briefly unavailable, no probe to ask), the next attempt climbs back. Each
+  attempt costs one request per candidate source; `0` turns it off.
+
+A source skipped at detection says why in the log: at INFO for `storagegrid`,
+which is tried everywhere, at WARNING for the sources you configured.
+
+`storagegrid` and `minio` talk to the S3 endpoint's own server over `requests`,
+and verify its certificate against `AWS_CA_BUNDLE` when it is set, as the S3
+client does. Behind a private CA, set `AWS_CA_BUNDLE` and both paths trust it.
 
 Set `COLLECTOR_SOURCE` to override `source` at runtime without editing the
 mounted ConfigMap.

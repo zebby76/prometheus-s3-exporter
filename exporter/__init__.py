@@ -26,6 +26,7 @@ from exporter.handler import (
     set_proxy_headers,
 )
 from exporter.probe import ConnectivityProbe
+from exporter.selection import DEFAULT_REDETECT_SECONDS, SourceSelector
 from exporter.sources import SourceContext, Usage, UsageSource
 
 from .utils import merge_dicts_ordered
@@ -219,6 +220,7 @@ def load_configuration(path=CONFIG_PATH):
         "max_failures": DEFAULT_MAX_FAILURES,
         "connectivity_interval": DEFAULT_CONNECTIVITY_INTERVAL_SECONDS,
         "retry_interval": DEFAULT_RETRY_INTERVAL_SECONDS,
+        "redetect_interval": DEFAULT_REDETECT_SECONDS,
         "probe_timeout": DEFAULT_PROBE_TIMEOUT_SECONDS,
         "proxy_headers": dict(DEFAULT_PROXY_HEADERS),
     }
@@ -691,6 +693,7 @@ def main():
     # A retry must never outlast the interval it is meant to shorten.
     retry_interval = min(int(settings["retry_interval"]), interval * 60)
     probe_timeout = probe_timeout_for(settings["probe_timeout"], connectivity_interval)
+    redetect_interval = int(settings["redetect_interval"])
 
     try:
         s3_client = build_s3_client(
@@ -712,8 +715,6 @@ def main():
         client=s3_client,
         config=settings["sources"],
     )
-
-    source = sources.resolve(context, settings["source"])
 
     # Its own client, so the probe's timeout budget never becomes the
     # collection's.
@@ -740,7 +741,60 @@ def main():
             }
         )
 
-    publish_info(source)
+    detections = []
+
+    def detect():
+        """Detect the usage source; from the second time on, with fresh clients."""
+        detect_context = context
+        if detections:
+            # Raises when the client cannot be rebuilt; the selector then keeps
+            # the current source.
+            detect_context = SourceContext(
+                endpoint_url=aws_endpoint_url,
+                region=aws_default_region,
+                bucket=s3_bucket_name,
+                access_key=aws_access_key_id,
+                secret_key=aws_secret_access_key,
+                client=build_s3_client(
+                    aws_access_key_id,
+                    aws_secret_access_key,
+                    aws_default_region,
+                    aws_endpoint_url,
+                ),
+                config=settings["sources"],
+            )
+        detections.append(True)
+
+        detected = sources.resolve(detect_context, settings["source"])
+        publish_info(detected)
+
+        if len(detections) > 1 and connectivity_interval:
+            # Its own try: the source has just been resolved, and a probe
+            # client that fails to build must not undo that.
+            try:
+                probe.set_client(
+                    build_probe_client(
+                        aws_access_key_id,
+                        aws_secret_access_key,
+                        aws_default_region,
+                        aws_endpoint_url,
+                        probe_timeout,
+                    )
+                )
+            except Exception as e:
+                logging.error(
+                    "Cannot rebuild the probe client, keeping the current one: %s",
+                    e,
+                )
+        return detected
+
+    selector = SourceSelector(
+        detect,
+        requested=settings["source"],
+        probe=probe if connectivity_interval else None,
+        max_failures=max_failures,
+        redetect_seconds=redetect_interval,
+    )
 
     collector = BucketSizeCollector(
         namespace=openshift_namespace,
@@ -756,59 +810,11 @@ def main():
     exporter(port=9773)
     health(port=9774, probe=probe if connectivity_interval else None)
 
-    failures = 0
     while not STOP.is_set():
-        succeeded = collect_once(source, collector, s3_bucket_name, interval * 60)
-        if succeeded:
-            failures = 0
-        else:
-            failures += 1
-            if failures >= max_failures:
-                logging.warning(
-                    "%s consecutive failures, re-detecting the usage source",
-                    failures,
-                )
-                failures = 0
-                try:
-                    context = SourceContext(
-                        endpoint_url=aws_endpoint_url,
-                        region=aws_default_region,
-                        bucket=s3_bucket_name,
-                        access_key=aws_access_key_id,
-                        secret_key=aws_secret_access_key,
-                        client=build_s3_client(
-                            aws_access_key_id,
-                            aws_secret_access_key,
-                            aws_default_region,
-                            aws_endpoint_url,
-                        ),
-                        config=settings["sources"],
-                    )
-                except Exception as e:
-                    logging.error("Cannot rebuild the S3 client: %s", e)
-                else:
-                    source = sources.resolve(context, settings["source"])
-                    publish_info(source)
-                    if connectivity_interval:
-                        # Its own try: the source has just been re-resolved
-                        # successfully, and a probe client that fails to build
-                        # must not undo that.
-                        try:
-                            probe.set_client(
-                                build_probe_client(
-                                    aws_access_key_id,
-                                    aws_secret_access_key,
-                                    aws_default_region,
-                                    aws_endpoint_url,
-                                    probe_timeout,
-                                )
-                            )
-                        except Exception as e:
-                            logging.error(
-                                "Cannot rebuild the probe client, keeping the "
-                                "current one: %s",
-                                e,
-                            )
+        succeeded = collect_once(
+            selector.source, collector, s3_bucket_name, interval * 60
+        )
+        selector.record(succeeded)
 
         # Retry sooner than the full interval after a failure: at 60 minutes,
         # one transient error would otherwise mean an hour of stale figures.

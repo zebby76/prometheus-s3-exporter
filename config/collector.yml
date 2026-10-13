@@ -82,3 +82,18 @@ configuration:
       #   # Only for a bucket created in a jurisdiction (eu, fedramp): without it
       #   # the API answers 404 rather than a wrong figure.
       #   jurisdiction: eu
+
+  # One exporter for a list of buckets (6.0.0, in progress: this build validates
+  # the list and checks it with --check-config, it does not monitor it yet).
+  # Without `buckets`, the exporter watches the one bucket S3_BUCKET_NAME names.
+  # See "Multi-bucket configuration" in README.md.
+  #
+  # - secret_keys:                # key names inside the Secrets (and variable
+  #     access_key: S3_KEY        # suffixes with env_prefix); defaults are
+  #     secret_key: S3_SECRET     # AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY and
+  #     bucket: S3_BUCKET         # S3_BUCKET_NAME
+  # - buckets:
+  #     - secret: app-a-s3        # read through the Kubernetes API; needs a Role
+  #       namespace: app-a        # with `get` on this Secret, in its namespace
+  #     - env_prefix: APP_C_      # variables set by envFrom with prefix APP_C_
+  #       namespace: app-c

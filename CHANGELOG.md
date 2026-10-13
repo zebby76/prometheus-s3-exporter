@@ -20,7 +20,21 @@ notes.
 
 ## [Unreleased]
 
-Nothing pending.
+Work toward 6.0.0: one exporter for a list of buckets.
+
+### Upgrading from 5.x
+
+Draft, completed as 6.0.0 takes shape. Nothing in this section breaks yet.
+
+### Added
+
+- `buckets:` and `secret_keys:` in `collector.yml`: a list of buckets, each with its credentials
+  and name read from a Kubernetes Secret through the API (the pod's ServiceAccount, the cluster
+  CA, a token re-read on every call), or from environment variables laid out by `envFrom` with a
+  `prefix`. Validated at startup: what only a human can fix stops the exporter. The list is not
+  monitored yet; started with it, the exporter stops with a message.
+- `--check-config`: resolves every bucket's credentials once and reports, without ever printing
+  a value; exits 1 if any bucket fails.
 
 ## [5.1.0]
 

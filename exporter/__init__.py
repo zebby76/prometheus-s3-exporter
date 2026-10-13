@@ -9,7 +9,7 @@ import time
 from collections import OrderedDict
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Optional
+from typing import List, Optional
 
 import boto3
 import yaml
@@ -19,6 +19,14 @@ from prometheus_client.core import REGISTRY, GaugeMetricFamily
 
 from exporter import sources
 from exporter._version import get_versions
+from exporter.buckets import (
+    BucketSpec,
+    ConfigError,
+    multi_bucket,
+    parse_buckets,
+    single_bucket_spec,
+)
+from exporter.credentials import CredentialsUnavailable
 from exporter.errors import describe
 from exporter.handler import (
     DEFAULT_PROXY_HEADERS,
@@ -26,6 +34,7 @@ from exporter.handler import (
     health,
     set_proxy_headers,
 )
+from exporter.kube import InClusterKubernetes
 from exporter.probe import ConnectivityProbe
 from exporter.selection import DEFAULT_REDETECT_SECONDS, SourceSelector
 from exporter.sources import SourceContext, Usage, UsageSource
@@ -693,6 +702,48 @@ def require_env(name):
     return value
 
 
+def bucket_specs(settings, environ=None, kube=None) -> List[BucketSpec]:
+    """The buckets to watch: the configured list, or the one the environment names.
+
+    Raises ConfigError when the list cannot be honoured.
+    """
+    environ = os.environ if environ is None else environ
+    if not multi_bucket(settings):
+        return [single_bucket_spec(environ)]
+    if kube is None:
+        kube = InClusterKubernetes.detect(environ)
+    return parse_buckets(settings, environ, kube)
+
+
+def check_config(specs: List[BucketSpec], out=None) -> int:
+    """Resolve every bucket's credentials once and report; 0 when all resolve.
+
+    What an operator runs (`oc exec … exporter --check-config`) to find the
+    Secret, key or RoleBinding that is missing before going live. Reports
+    names only: no value read from a Secret is ever printed.
+    """
+    out = out or sys.stdout
+    failures = 0
+    for spec in specs:
+        try:
+            credentials = spec.credentials.resolve()
+        except CredentialsUnavailable as exc:
+            failures += 1
+            print(f"FAIL  {exc}", file=out)
+            continue
+        print(
+            f"OK    {spec.credentials.describe()}: bucket {credentials.bucket}, "
+            f"namespace {spec.label_namespace}, region {spec.region}, "
+            f"endpoint {spec.endpoint_url or 'AWS default'}",
+            file=out,
+        )
+    print(
+        f"{len(specs) - failures} of {len(specs)} bucket(s) resolved",
+        file=out,
+    )
+    return 1 if failures else 0
+
+
 def main():
 
     signal.signal(signal.SIGTERM, signal_handler)
@@ -713,6 +764,12 @@ def main():
         action="store_true",
         help="turn on verbose (DEBUG) logging. Overrides --log-level.",
     )
+    parser.add_argument(
+        "--check-config",
+        action="store_true",
+        help="validate the configuration, resolve every bucket's credentials, "
+        "report, and exit: 0 when every bucket resolves, 1 otherwise.",
+    )
     args = parser.parse_args()
 
     log_handler = logging.StreamHandler()
@@ -726,16 +783,40 @@ def main():
     )
     logging.captureWarnings(True)
 
+    settings = load_configuration()
+
+    if args.check_config or multi_bucket(settings):
+        try:
+            specs = bucket_specs(settings)
+        except ConfigError as e:
+            logging.error("Invalid configuration: %s", e)
+            sys.exit(1)
+        if args.check_config:
+            sys.exit(check_config(specs))
+        # Until the multi-bucket monitor lands, a list is validated and refused
+        # rather than half-served.
+        logging.error(
+            "Multi-bucket monitoring is not available in this build yet; "
+            "%s bucket(s) configured. Validate them with --check-config.",
+            len(specs),
+        )
+        sys.exit(1)
+
     openshift_namespace = require_env("OPENSHIFT_NAMESPACE")
-    aws_access_key_id = require_env("AWS_ACCESS_KEY_ID")
-    aws_secret_access_key = require_env("AWS_SECRET_ACCESS_KEY")
+    require_env("AWS_ACCESS_KEY_ID")
+    require_env("AWS_SECRET_ACCESS_KEY")
     aws_default_region = require_env("AWS_DEFAULT_REGION")
-    s3_bucket_name = require_env("S3_BUCKET_NAME")
+    require_env("S3_BUCKET_NAME")
     # Optional: empty means the real AWS endpoints, which is what the
     # CloudWatch source expects.
     aws_endpoint_url = os.getenv("AWS_ENDPOINT_URL", "")
 
-    settings = load_configuration()
+    # Through the same provider as a configured bucket; it cannot fail here,
+    # require_env has just checked the very variables it reads.
+    credentials = single_bucket_spec(os.environ).credentials.resolve()
+    aws_access_key_id = credentials.access_key
+    aws_secret_access_key = credentials.secret_key
+    s3_bucket_name = credentials.bucket
     interval = positive_number(settings, "interval", "minutes")
     max_failures = int(settings["max_failures"])
     connectivity_interval = int(settings["connectivity_interval"])

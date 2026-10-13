@@ -78,6 +78,114 @@ client does. Behind a private CA, set `AWS_CA_BUNDLE` and both paths trust it.
 Set `COLLECTOR_SOURCE` to override `source` at runtime without editing the
 mounted ConfigMap.
 
+## Multi-bucket configuration
+
+> **In progress for 6.0.0.** This build reads and validates the bucket list and
+> checks every bucket's credentials (`--check-config`), but does not monitor the
+> list yet: started with `buckets:` and without `--check-config`, it stops with a
+> message. Without `buckets:` nothing changes.
+
+Without `buckets:` the exporter watches one bucket, named by the environment:
+`S3_BUCKET_NAME`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`,
+`AWS_DEFAULT_REGION`, `OPENSHIFT_NAMESPACE` and, optionally, `AWS_ENDPOINT_URL`.
+
+With `buckets:`, one exporter watches a list. Each entry names where the bucket's
+credentials live; the bucket's name comes with them.
+
+```yaml
+configuration:
+  # The key names inside the Secrets -- and the variable suffixes with
+  # env_prefix. Defaults: AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, S3_BUCKET_NAME.
+  - secret_keys:
+      access_key: S3_KEY
+      secret_key: S3_SECRET
+      bucket: S3_BUCKET
+
+  - buckets:
+      - secret: app-a-s3          # a Secret, read through the Kubernetes API
+        namespace: app-a          # default: the exporter's own namespace
+      - secret: legacy-s3
+        namespace: app-b
+        name: legacy-uploads      # when the Secret does not hold the bucket name
+        secret_keys: { access_key: KEY_ID }   # merged over the global names
+        endpoint_url: https://grid-2.example:8082   # default: AWS_ENDPOINT_URL
+        region: eu-west-1         # default: AWS_DEFAULT_REGION
+      - env_prefix: APP_C_        # variables set by envFrom with prefix APP_C_
+        namespace: app-c          # label only; default: OPENSHIFT_NAMESPACE
+```
+
+`AWS_DEFAULT_REGION` and `AWS_ENDPOINT_URL` stay global settings, overridable per
+bucket.
+
+### Credentials
+
+**From a Secret, through the Kubernetes API** -- the main mode. The exporter
+reads `GET /api/v1/namespaces/<namespace>/secrets/<secret>` with its pod's
+ServiceAccount token, verified against the cluster CA. The Secret stays in the
+namespace of the application that owns the bucket: nothing to copy, and a
+rotated key is picked up without restarting the exporter. Each Secret needs its
+own grant, restricted to that one Secret, in its namespace:
+
+```yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: { name: s3-exporter-read, namespace: app-a }
+rules:
+  - apiGroups: [""]
+    resources: [secrets]
+    resourceNames: [app-a-s3]
+    verbs: [get]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: { name: s3-exporter-read, namespace: app-a }
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: Role, name: s3-exporter-read }
+subjects:
+  - { kind: ServiceAccount, name: s3-exporter, namespace: monitoring }
+```
+
+Never a ClusterRole on Secrets: the exporter must read the Secrets it is given
+and nothing else.
+
+**From environment variables** -- the fallback, for a run outside a cluster or
+a Secret already mounted into the pod. `envFrom` with a `prefix` turns the
+Secret's key `S3_KEY` into the variable `APP_C_S3_KEY`, so the same
+`secret_keys` describe a Secret whichever way it arrives:
+
+```yaml
+envFrom:
+  - prefix: APP_C_
+    secretRef: { name: app-c-s3 }
+```
+
+Environment variables do not follow a rotation: the pod has to restart.
+
+Whatever the mode, no credential is ever logged, printed or put in an error
+message: they name the Secret, the key or the variable, never what it holds.
+
+### Validation and `--check-config`
+
+What only a human can fix stops the start (exit 1, so the pod lands in
+CrashLoopBackOff): `buckets` that is not a non-empty list, an entry with both or
+neither of `secret` and `env_prefix`, an unknown key (a typo in one of a hundred
+entries must not go unnoticed), an invalid Secret or namespace name, the same
+bucket listed twice, `secret` mode outside a cluster, no region.
+
+What can fix itself does not stop the start: a Secret that does not exist yet, a
+RoleBinding still to be applied, a missing key in a Secret.
+
+`--check-config` resolves every bucket's credentials once, reports, and exits
+with 0 when all of them resolve, 1 otherwise. Run it to find the missing Secret,
+key or RoleBinding before going live:
+
+```console
+$ oc exec deploy/s3-exporter -- exporter --check-config
+OK    secret app-a/app-a-s3: bucket uploads-a, namespace app-a, region us-east-1, endpoint https://grid.example:8082
+FAIL  reading secret app-b/app-b-s3 is forbidden (missing Role/RoleBinding for `get` on this secret?)
+FAIL  secret app-d/partial: S3_SECRET is missing or empty
+1 of 3 bucket(s) resolved
+```
+
 ## Metrics
 
 | Metric | Meaning |

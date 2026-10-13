@@ -1,0 +1,9 @@
+---
+kind: PrometheusExporterConfig
+configuration:
+  # One minute, to see collections move in a demo; production keeps 5.
+  - interval: 1
+  - source: auto
+  # The production default: the probe runs every 30 s on its own connection.
+  - connectivity_interval: 30
+  - probe_timeout: 5

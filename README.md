@@ -91,6 +91,10 @@ mounted ConfigMap.
 | `webtech_s3_bucket_probe_duration_seconds` | latency of the last probe |
 | `webtech_s3_bucket_probe_age_seconds` | age of the last probe |
 | `webtech_s3_bucket_probe_retries_total` | probes that had to reconnect, since start |
+| `webtech_s3_bucket_probe_errors_total{reason}` | failed probe attempts by reason, retried ones included |
+| `webtech_s3_bucket_probe_connections_total` | TCP connections the probe established |
+| `webtech_s3_bucket_dns_duration_seconds` | duration of the last resolution of the endpoint name |
+| `webtech_s3_bucket_dns_failures_total` | resolutions of the endpoint name that failed |
 | `webtech_s3_exporter_status` | 1 when the last collection succeeded |
 | `webtech_s3_exporter_up` | 1 when the exporter is answering |
 
@@ -192,6 +196,57 @@ stddev_over_time(webtech_s3_bucket_probe_duration_seconds[1h])
 - **Near zero, each instance steady at its own value.** A genuine per-path or
   per-bucket difference. On StorageGRID, start with the bucket's consistency
   level: `strong-global` coordinates every site where `strong-site` stays local.
+
+### Telling the DNS from the network
+
+botocore prints `Could not connect to the endpoint URL` for a name that does not
+resolve and for a connection that was refused alike; the error that tells them
+apart is buried in the exception chain. The probe digs it out. A failed check
+logs **every attempt** with its own duration and root cause, and its reason:
+
+```text
+Bucket b became unreachable via HeadBucket after 10.019s and 2 attempts [connect_timeout]:
+  #1 5.010s ConnectTimeoutError: Connect timeout on endpoint URL: "…" (caused by TimeoutError: timed out);
+  #2 5.010s ConnectTimeoutError: …
+```
+
+The reason is one of `dns`, `connect_timeout`, `connect`, `read_timeout`,
+`http_5xx`, `http_4xx`, `other`. It is in that line, in the `503` body of
+`/readyz`, and counted per failed attempt in
+`webtech_s3_bucket_probe_errors_total{reason}` -- retried attempts included, so
+a hiccup the retry absorbed still shows.
+
+Two more signals separate the DNS from the rest:
+
+- **The DNS is measured on its own.** After each check the probe resolves the
+  endpoint's name through the same resolver -- search list, `ndots` and all --
+  into `webtech_s3_bucket_dns_duration_seconds` and
+  `webtech_s3_bucket_dns_failures_total`, and logs the addresses when they
+  change. The S3 call only resolves when it opens a connection, and its duration
+  lumps the lookup in with everything else; a DNS that fails while the probe's
+  connection stays open is invisible to it.
+- **New connections are counted** in `webtech_s3_bucket_probe_connections_total`,
+  and a check that opened one or retried is logged at INFO. Only a new
+  connection resolves the name, so a peak in `probe_duration_seconds` without a
+  new connection is not the DNS.
+
+What each failure looked like on the local stack (`make obs/chaos/…`):
+
+| Failure | Probe line |
+| --- | --- |
+| DNS query lost (conntrack race, overloaded DNS) | slow probes in **multiples of 5s** (the resolver's timeout), failures after 20s and more |
+| DNS answers SERVFAIL | `Cannot resolve …` at once; the probe stays green while its connection lives |
+| Nothing listens (RST) | `[connect]` in a few ms, `caused by ConnectionRefusedError` |
+| Address down | `[connect_timeout]`, 5s per attempt (`probe_timeout`) |
+| Balancer up, storage down | `[http_5xx]` in a few ms |
+
+On OpenShift, `ndots:5` makes every name with fewer than five dots go through
+the whole search list first: `s3.example.com` costs four pairs of A and AAAA
+queries, three of them answered NXDOMAIN, each a chance to lose a packet.
+Writing the endpoint as an absolute name, with a trailing dot
+(`https://s3.example.com.:443`), or lowering `ndots` in the pod's `dnsConfig`,
+removes the detour. Measure it first: `webtech_s3_bucket_dns_duration_seconds`
+before and after.
 
 The two endpoints answer different questions:
 
@@ -356,6 +411,52 @@ make up      # exporter + SeaweedFS (S3), bucket preloaded from test/assets
 make logs
 make down
 ```
+
+### Observability stack
+
+`test/observability` runs the exporter the way production does, one instance per
+bucket, behind the same kind of path: a cluster DNS with OpenShift's search list
+and `ndots:5`, and a load balancer with an idle timeout. Prometheus, Loki and
+Grafana sit behind Traefik, taken from base-php's `test/demo-infra`.
+
+```text
+exporter-{small,medium,large} --DNS--> dnsfault --> CoreDNS
+                              --S3---> lb (HAProxy) --> SeaweedFS
+```
+
+```bash
+make obs/up       # build, start, fill three buckets with random content (first run: a few minutes)
+make obs/urls     # Grafana, Prometheus, Loki, the exporters
+make obs/down     # stop and drop the volumes
+```
+
+Faults, cleared by `make obs/chaos/off`:
+
+| Target | Effect |
+| --- | --- |
+| `obs/chaos/dns-drop [RATIO=0.33]` | loses that share of DNS queries |
+| `obs/chaos/dns-delay [DELAY_MS=300]` | slows every DNS query down |
+| `obs/chaos/dns-servfail` | answers SERVFAIL |
+| `obs/chaos/lb-idle [IDLE=25s]` | sets the balancer's idle timeout; under 30s, every probe reconnects |
+| `obs/chaos/lb-refuse` | nothing listens on the S3 port any more |
+| `obs/chaos/lb-down` | stops the balancer: its address stops answering |
+| `obs/chaos/s3-down` | stops the storage: the balancer answers 503 |
+
+Grafana comes provisioned with the **S3 buckets** dashboard
+(`test/observability/grafana/dashboards/s3.dashboard.json`): the per-bucket
+table, and a *Connectivity diagnosis* row -- probe errors by reason, DNS
+resolution time with the 5s resolver timeout marked, probe latency against new
+connections, reachability, and the probe's log lines from Loki. It works against
+a production Prometheus as is; point its *Log selector* variable at wherever the
+exporters' logs live. The table's CPU, memory and throttling columns come from
+cAdvisor, relabelled so its series join on `(namespace, pod)` like the kubelet's,
+the container ID standing in for the pod name.
+
+`dnsfault` is a small UDP relay in front of CoreDNS. CoreDNS cannot disturb a
+name it resolves itself: its `erratic` plugin runs after `hosts` and `forward`.
+The exporters mount their own `/etc/resolv.conf` so their queries reach it
+directly, as a pod's reach the cluster DNS, rather than through Docker's
+embedded resolver, which answers SERVFAIL on its own after a few seconds.
 
 Or without containers:
 

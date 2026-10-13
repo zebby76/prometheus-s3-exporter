@@ -1,6 +1,7 @@
 """Connectivity probe: method selection, outcomes, and the /readyz endpoint."""
 
 import logging
+import socket
 import threading
 from datetime import datetime, timedelta, timezone
 
@@ -257,6 +258,269 @@ def test_the_thread_stops_on_the_shared_event():
     assert not thread.is_alive()
 
 
+# --- what failed, and where ------------------------------------------------
+
+
+class SlowThenFailingClient:
+    """First attempt fails after a while, the second at once, like production."""
+
+    def __init__(self, clock, errors):
+        self.clock = clock
+        self.errors = list(errors)
+
+    def head_bucket(self, **kwargs):
+        error, seconds = self.errors.pop(0)
+        self.clock.now += seconds
+        raise error
+
+
+class Clock:
+    def __init__(self):
+        self.now = 100.0
+
+    def __call__(self):
+        return self.now
+
+
+def test_a_failed_check_keeps_every_attempt(monkeypatch):
+    clock = Clock()
+    monkeypatch.setattr("exporter.probe.time.perf_counter", clock)
+    client = SlowThenFailingClient(
+        clock,
+        [(TimeoutError("connect timed out"), 5.0), (ConnectionError("refused"), 0.014)],
+    )
+
+    result = ConnectivityProbe(client, "my-bucket", 30).check_once()
+
+    # The first attempt carried the five seconds; it used to go unlogged.
+    assert result.error.startswith("#1 5.000s TimeoutError: connect timed out")
+    assert "#2 0.014s ConnectionError: refused" in result.error
+    assert result.reason == "other"
+
+
+def test_every_failed_attempt_is_counted_by_reason():
+    # Retried and recovered still counts: that is the hiccup worth seeing.
+    probe = ConnectivityProbe(StaleConnectionClient(), "my-bucket", 30)
+    probe.check_once()
+
+    errors = probe.errors_total
+    assert errors["other"] == 1
+    assert sum(errors.values()) == 1
+
+
+def test_a_recovered_retry_is_logged_at_info_with_its_cause(caplog):
+    probe = ConnectivityProbe(StaleConnectionClient(), "my-bucket", 30)
+
+    with caplog.at_level(logging.INFO):
+        probe.check_once()
+
+    assert any(
+        record.levelno == logging.INFO
+        and "(2 attempts): #1 failed in" in record.message
+        and "RemoteDisconnected" in record.message
+        for record in caplog.records
+    )
+
+
+def test_the_transition_line_names_the_reason(caplog):
+    client = FakeClient(head_error=ConnectionError("refused"))
+    probe = ConnectivityProbe(client, "my-bucket", 60)
+    probe._result = ProbeResult(reachable=True, checked_at=NOW)
+
+    with caplog.at_level(logging.ERROR):
+        probe.check_once()
+
+    assert any("2 attempts [other]: #1" in record.message for record in caplog.records)
+
+
+# --- new connections ---------------------------------------------------------
+
+
+class Socket:
+    """Something a WeakSet can hold, as a real socket."""
+
+
+class Connection:
+    def __init__(self):
+        self.sock = None
+
+
+class PooledClient(FakeClient):
+    """The botocore -> urllib3 attribute path, with one pooled connection.
+
+    Each call reconnects when `drop` is set, the way urllib3 reopens a
+    connection the server closed: a new socket under the same object.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.conn = Connection()
+        self.drop = True
+        queue = type("Queue", (), {"queue": [self.conn]})()
+        pool = type("Pool", (), {"pool": queue})()
+        manager = type("Manager", (), {"pools": {"key": pool}})()
+        session = type("Session", (), {"_manager": manager})()
+        self._endpoint = type("Endpoint", (), {"http_session": session})()
+
+    def head_bucket(self, **kwargs):
+        super().head_bucket(**kwargs)
+        if self.drop or self.conn.sock is None:
+            self.conn.sock = Socket()
+
+
+def test_a_new_connection_is_counted_and_logged(caplog):
+    probe = ConnectivityProbe(PooledClient(), "my-bucket", 30)
+
+    with caplog.at_level(logging.INFO):
+        probe.check_once()
+
+    assert probe.connections_total == 1
+    assert any("1 new connection" in record.message for record in caplog.records)
+
+
+def test_a_reused_connection_stays_at_debug(caplog):
+    client = PooledClient()
+    probe = ConnectivityProbe(client, "my-bucket", 30)
+    probe.check_once()
+    client.drop = False
+
+    with caplog.at_level(logging.DEBUG):
+        caplog.clear()
+        probe.check_once()
+
+    timing = [r for r in caplog.records if "Probe S3 Bucket" in r.message]
+    assert [r.levelno for r in timing] == [logging.DEBUG]
+    assert probe.connections_total == 1
+
+
+def test_a_connection_reopened_in_place_is_counted():
+    # urllib3 reconnects a dropped connection under the same object: counting
+    # connection objects missed every reconnection an idle timeout causes.
+    client = PooledClient()
+    probe = ConnectivityProbe(client, "my-bucket", 30)
+
+    for _ in range(3):
+        probe.check_once()
+
+    assert probe.connections_total == 3
+
+
+def test_the_connection_count_survives_a_client_rebuild():
+    probe = ConnectivityProbe(PooledClient(), "my-bucket", 30)
+    probe.check_once()
+    probe.set_client(PooledClient())
+    probe.check_once()
+
+    assert probe.connections_total == 2
+
+
+def test_connections_are_unknown_when_the_client_hides_them():
+    probe = ConnectivityProbe(FakeClient(), "my-bucket", 30)
+    probe.check_once()
+
+    assert probe.connections_total is None
+
+
+def test_a_real_boto3_client_exposes_its_pools():
+    # Guards the private attribute path against a botocore upgrade.
+    import boto3
+
+    client = boto3.client(
+        "s3",
+        endpoint_url="http://s3.example:8333",
+        region_name="us-east-1",
+        aws_access_key_id="a",
+        aws_secret_access_key="b",
+    )
+    probe = ConnectivityProbe(client, "my-bucket", 30)
+    assert probe._pooled_sockets() == []
+
+
+# --- DNS ---------------------------------------------------------------------
+
+
+class EndpointClient(FakeClient):
+    def __init__(self, url):
+        super().__init__()
+        self.meta = type("Meta", (), {"endpoint_url": url})()
+
+
+def fake_resolver(monkeypatch, answers):
+    """getaddrinfo answering from `answers`, one item per call."""
+    calls = []
+
+    def getaddrinfo(host, port, type=0):
+        calls.append((host, port))
+        answer = answers.pop(0)
+        if isinstance(answer, Exception):
+            raise answer
+        return [(2, 1, 6, "", (address, port)) for address in answer]
+
+    monkeypatch.setattr("exporter.probe.socket.getaddrinfo", getaddrinfo)
+    return calls
+
+
+def test_the_endpoint_name_is_resolved_and_timed(monkeypatch, caplog):
+    calls = fake_resolver(monkeypatch, [["10.0.0.2", "10.0.0.1"]])
+    probe = ConnectivityProbe(EndpointClient("http://s3.example:8333"), "b", 30)
+
+    with caplog.at_level(logging.INFO):
+        result = probe.resolve_once()
+
+    assert calls == [("s3.example", 8333)]
+    assert result.addresses == ("10.0.0.1", "10.0.0.2")
+    assert result.error is None
+    assert result.duration_seconds >= 0
+    assert any(
+        "s3.example resolves to 10.0.0.1, 10.0.0.2" in r.message for r in caplog.records
+    )
+
+
+def test_the_default_port_follows_the_scheme(monkeypatch):
+    calls = fake_resolver(monkeypatch, [["10.0.0.1"]])
+    ConnectivityProbe(EndpointClient("https://s3.example"), "b", 30).resolve_once()
+
+    assert calls == [("s3.example", 443)]
+
+
+def test_a_failed_resolution_is_counted_and_logged_once(monkeypatch, caplog):
+    failure = socket.gaierror(-3, "Temporary failure in name resolution")
+    fake_resolver(monkeypatch, [failure, failure, ["10.0.0.1"]])
+    probe = ConnectivityProbe(EndpointClient("http://s3.example"), "b", 30)
+
+    with caplog.at_level(logging.DEBUG):
+        probe.resolve_once()
+        probe.resolve_once()
+        probe.resolve_once()
+
+    assert probe.dns_failures_total == 2
+    errors = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert len(errors) == 1
+    assert "Cannot resolve s3.example" in errors[0].message
+    assert any("resolves again" in r.message for r in caplog.records)
+
+
+def test_a_change_of_address_is_logged(monkeypatch, caplog):
+    fake_resolver(monkeypatch, [["10.0.0.1"], ["10.0.0.9"]])
+    probe = ConnectivityProbe(EndpointClient("http://s3.example"), "b", 30)
+    probe.resolve_once()
+
+    with caplog.at_level(logging.INFO):
+        probe.resolve_once()
+
+    assert any(
+        "now resolves to 10.0.0.9 (was 10.0.0.1)" in r.message for r in caplog.records
+    )
+
+
+def test_no_endpoint_means_nothing_to_resolve(monkeypatch):
+    calls = fake_resolver(monkeypatch, [])
+    probe = ConnectivityProbe(FakeClient(), "b", 30)
+
+    assert probe.resolve_once().checked_at is None
+    assert calls == []
+
+
 # --- /readyz ---------------------------------------------------------------
 
 
@@ -291,6 +555,11 @@ def test_ready_is_503_when_the_bucket_is_unreachable():
     resp = ready(ProbeResult(reachable=False, checked_at=NOW, error="boom"))
     assert resp.status == falcon.HTTP_503
     assert "boom" in resp.text
+
+
+def test_ready_names_the_reason_of_the_failure():
+    resp = ready(ProbeResult(reachable=False, checked_at=NOW, error="x", reason="dns"))
+    assert '"reason": "dns"' in resp.text
 
 
 def test_ready_is_200_before_the_first_probe():

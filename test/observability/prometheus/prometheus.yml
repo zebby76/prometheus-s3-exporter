@@ -1,0 +1,87 @@
+# Taken from base-php test/demo-infra: every container labelled
+# prometheus-scrape=true is scraped on its prometheus-port, under prometheus-job.
+
+global:
+  scrape_interval: 15s
+
+scrape_configs:
+  - job_name: "autodiscover"
+    scrape_interval: 10s
+    docker_sd_configs:
+      - host: unix:///var/run/docker.sock
+    relabel_configs:
+      - source_labels: [__meta_docker_container_label_prometheus_scrape]
+        regex: true
+        action: keep
+      - source_labels: [__meta_docker_container_label_prometheus_job]
+        target_label: job
+        action: replace
+      - target_label: namespace
+        replacement: default
+        action: replace
+      - source_labels: [__meta_docker_container_name]
+        regex: "/(.*)"
+        target_label: container_name
+        replacement: "$1"
+        action: replace
+      - source_labels: [__meta_docker_container_name]
+        regex: "/(.*)"
+        target_label: container
+        replacement: "$1"
+        action: replace
+      - source_labels: [__meta_docker_container_name]
+        regex: "/(.*)"
+        target_label: kubernetes_io_hostname
+        replacement: "$1"
+        action: replace
+      - source_labels: [__meta_docker_container_label_prometheus_labels_pod]
+        target_label: pod
+        action: replace
+      - source_labels: [__meta_docker_container_label_prometheus_labels_pod]
+        target_label: kubernetes_pod_name
+        action: replace
+      - source_labels: [__meta_docker_container_label_prometheus_labels_pod]
+        target_label: pod_name
+        action: replace
+      - source_labels:
+          [__address__, __meta_docker_container_label_prometheus_port]
+        separator: ";"
+        regex: '([^:]+)(?::\d+)?;(\d+)'
+        target_label: __address__
+        replacement: "$1:$2"
+        action: replace
+      # Not in base-php: without a prometheus-labels-pod label, the container
+      # ID stands in for the pod, so the cadvisor job below can be joined on
+      # (namespace, pod) as the kubelet's cAdvisor is on OpenShift.
+      - source_labels: [pod, __meta_docker_container_id]
+        separator: ";"
+        regex: ";(.+)"
+        target_label: pod
+        replacement: "$1"
+        action: replace
+
+  # Container CPU and memory, reshaped like the kubelet's cAdvisor series:
+  # namespace, pod and container labels, the pod being the container ID.
+  - job_name: "cadvisor"
+    scrape_interval: 10s
+    static_configs:
+      - targets: ["cadvisor:8080"]
+    metric_relabel_configs:
+      - source_labels: [__name__]
+        regex: "container_(cpu_usage_seconds_total|memory_working_set_bytes|cpu_cfs_periods_total|cpu_cfs_throttled_periods_total)"
+        action: keep
+      - source_labels: [id]
+        regex: "/docker/[0-9a-f]{64}"
+        action: keep
+      - source_labels: [id]
+        regex: "/docker/([0-9a-f]{64})"
+        target_label: pod
+        replacement: "$1"
+      - source_labels: [id]
+        regex: "/docker/([0-9a-f]{12}).*"
+        target_label: container
+        replacement: "$1"
+      - target_label: namespace
+        replacement: default
+      - regex: "id|cpu"
+        action: labeldrop

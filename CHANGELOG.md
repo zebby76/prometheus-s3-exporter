@@ -20,7 +20,29 @@ notes.
 
 ## [Unreleased]
 
-Nothing pending.
+### Added
+
+- The connectivity probe tells a DNS failure from a network one. botocore prints the same
+  `Could not connect to the endpoint URL` for both; a failed check now logs every attempt with its
+  own duration and root cause (`caused by gaierror: …`, `caused by ConnectionRefusedError: …`),
+  and a reason: `dns`, `connect_timeout`, `connect`, `read_timeout`, `http_5xx`, `http_4xx`,
+  `other`. The reason is also in the `503` body of `/readyz`.
+- `webtech_s3_bucket_probe_errors_total{reason}`: failed probe attempts by reason, retried ones
+  included, every reason present from the start.
+- `webtech_s3_bucket_dns_duration_seconds` and `webtech_s3_bucket_dns_failures_total`: the
+  endpoint's name is resolved on its own after each check, through the same resolver, and its
+  addresses are logged when they change.
+- `webtech_s3_bucket_probe_connections_total`: TCP connections the probe established, a
+  reconnection after an idle timeout included. A check that opened one, or retried, is logged at
+  INFO with the cause of the failed attempt.
+- `test/observability`: a local stack with one exporter per bucket behind a cluster-like DNS and a
+  load balancer, Prometheus, Loki, Grafana and cAdvisor, and `make obs/chaos/*` targets that inject
+  DNS and network faults. Grafana is provisioned with the S3 buckets dashboard, extended with a
+  connectivity diagnosis row.
+
+### Changed
+
+- A failed collection logs the root cause of the error, not only botocore's message.
 
 ## [5.0.0]
 

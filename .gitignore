@@ -25,3 +25,6 @@ MANIFEST
 venv/
 env/
 dev-venv/
+
+# Local observability stack: the live DNS fault, written by make obs/chaos/*
+test/observability/dnsfault/state/fault.conf

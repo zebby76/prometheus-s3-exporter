@@ -14,7 +14,8 @@ from exporter import (
     load_configuration,
     positive_number,
 )
-from exporter.probe import ProbeResult
+from exporter.errors import REASONS
+from exporter.probe import DnsResult, ProbeResult
 from exporter.sources.base import SourceUnavailable, Usage
 
 
@@ -176,9 +177,21 @@ def test_fast_collection_is_not_warned_about(caplog):
 
 
 class StubProbe:
-    def __init__(self, result, retries_total=0):
+    def __init__(
+        self,
+        result,
+        retries_total=0,
+        errors_total=None,
+        connections_total=None,
+        dns=None,
+        dns_failures_total=0,
+    ):
         self.result = result
         self.retries_total = retries_total
+        self.errors_total = errors_total or {reason: 0 for reason in REASONS}
+        self.connections_total = connections_total
+        self.dns = dns or DnsResult()
+        self.dns_failures_total = dns_failures_total
 
 
 def test_probe_metrics_are_published_when_a_probe_is_wired():
@@ -200,6 +213,41 @@ def test_probe_metrics_are_published_when_a_probe_is_wired():
     # Published so a reconnection reads as a reconnection instead of hiding in
     # the duration as latency.
     assert values["webtech_s3_bucket_probe_retries_total"] == 7
+
+
+def test_the_probe_diagnostics_are_published():
+    probe = StubProbe(
+        ProbeResult(reachable=True, checked_at=NOW),
+        errors_total={**{reason: 0 for reason in REASONS}, "dns": 3},
+        connections_total=12,
+        dns=DnsResult(host="s3.example", duration_seconds=5.004, checked_at=NOW),
+        dns_failures_total=2,
+    )
+    collector = BucketSizeCollector("ns", "my-bucket", 60, probe=probe)
+
+    metrics = {metric.name: metric for metric in collector.collect()}
+
+    errors = {
+        sample.labels["reason"]: sample.value
+        for sample in metrics["webtech_s3_bucket_probe_errors_total"].samples
+    }
+    # Every reason, zeros included, so increase() sees the first error.
+    assert set(errors) == set(REASONS)
+    assert errors["dns"] == 3
+    assert errors["connect"] == 0
+    assert metrics["webtech_s3_bucket_probe_connections_total"].samples[0].value == 12
+    assert metrics["webtech_s3_bucket_dns_duration_seconds"].samples[0].value == 5.004
+    assert metrics["webtech_s3_bucket_dns_failures_total"].samples[0].value == 2
+
+
+def test_connections_are_omitted_when_the_client_cannot_count_them():
+    probe = StubProbe(ProbeResult(reachable=True, checked_at=NOW))
+    collector = BucketSizeCollector("ns", "my-bucket", 60, probe=probe)
+
+    names = {metric.name for metric in collector.collect()}
+
+    assert "webtech_s3_bucket_probe_connections_total" not in names
+    assert "webtech_s3_bucket_dns_duration_seconds" in names
 
 
 def test_an_unreachable_bucket_is_reported_as_zero():

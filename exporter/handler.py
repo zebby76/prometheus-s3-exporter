@@ -208,6 +208,7 @@ class ReadinessHandler:
             {
                 "status": False,
                 "bucket": "unreachable",
+                "reason": result.reason,
                 "error": result.error,
                 "age_seconds": round(result.age_seconds(), 1),
             }

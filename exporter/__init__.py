@@ -19,6 +19,7 @@ from prometheus_client.core import REGISTRY, GaugeMetricFamily
 
 from exporter import sources
 from exporter._version import get_versions
+from exporter.errors import describe
 from exporter.handler import (
     DEFAULT_PROXY_HEADERS,
     exporter,
@@ -546,6 +547,46 @@ class BucketSizeCollector(object):
                         "Connectivity probe attempts retried since start.",
                     ]
                 )
+                # Every reason from the start, at zero: increase() over a series
+                # that appears with its first error misses that error.
+                for reason, count in self.probe.errors_total.items():
+                    metrics.append(
+                        [
+                            collector_metric_name + ["bucket_probe_errors_total"],
+                            merge_dicts_ordered(prometheus_labels, reason=reason),
+                            float(count),
+                            "Connectivity probe attempts that failed, by reason.",
+                        ]
+                    )
+                connections = self.probe.connections_total
+                if connections is not None:
+                    metrics.append(
+                        [
+                            collector_metric_name + ["bucket_probe_connections_total"],
+                            prometheus_labels,
+                            float(connections),
+                            "TCP connections the connectivity probe established "
+                            "since start.",
+                        ]
+                    )
+                dns = self.probe.dns
+                metrics.append(
+                    [
+                        collector_metric_name + ["bucket_dns_duration_seconds"],
+                        prometheus_labels,
+                        dns.duration_seconds,
+                        "Duration of the last resolution of the endpoint name, "
+                        "in seconds.",
+                    ]
+                )
+                metrics.append(
+                    [
+                        collector_metric_name + ["bucket_dns_failures_total"],
+                        prometheus_labels,
+                        float(self.probe.dns_failures_total),
+                        "Resolutions of the endpoint name that failed since start.",
+                    ]
+                )
 
         except Exception as e:
             logging.error(e)
@@ -571,7 +612,7 @@ def collect_once(
         usage = source.fetch()
     except Exception as e:
         duration = time.perf_counter() - started
-        logging.error("Collect S3 Bucket %s failed: %s", bucket_name, e)
+        logging.error("Collect S3 Bucket %s failed: %s", bucket_name, describe(e))
         # Keep the previous figures rather than dropping them to zero: a failed
         # cycle should show up as status 0 and a growing staleness, not as a
         # bucket that suddenly looks empty.

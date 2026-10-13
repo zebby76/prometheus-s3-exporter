@@ -1,0 +1,33 @@
+# The "cluster" DNS the exporters' pods would ask, reached through dnsfault.
+
+# What a pod's search list turns every external name into first (ndots:5):
+# s3.storage.internal.demo.svc.cluster.local, ...svc.cluster.local, ...
+# The cluster answers NXDOMAIN for each of them, as OpenShift does.
+cluster.local:53 {
+    log
+    errors
+    prometheus 0.0.0.0:9153
+    template ANY ANY {
+        rcode NXDOMAIN
+    }
+}
+
+# The storage endpoint the exporters are configured with: the load balancer's
+# fixed address, like a service VIP -- it stays in the DNS whether or not the
+# balancer is up, so stopping it shows a dead address, not a missing name.
+storage.internal:53 {
+    log
+    errors
+    prometheus 0.0.0.0:9153
+    hosts {
+        172.31.53.80 s3.storage.internal
+    }
+}
+
+.:53 {
+    log
+    errors
+    health 0.0.0.0:8080
+    prometheus 0.0.0.0:9153
+    forward . 127.0.0.11
+}

@@ -107,6 +107,92 @@ logs: ## logs [ SERVICE=... ] : follow the stack logs
 _assert-metrics:
 	@./test/smoke/assert_metrics.sh
 
+# —— Observability stack ——————————————————————————————————————————————————————————————————————————————————————————————
+#
+# test/observability: one exporter per bucket behind a cluster-like DNS and a load balancer, with Prometheus, Loki and
+# Grafana behind Traefik. Its own compose project, so it never touches the smoke-test stack above.
+
+OBS_DIR                     := test/observability
+OBS                         := docker compose --project-directory $(OBS_DIR) -f $(OBS_DIR)/compose.yaml
+OBS_FAULT                   := $(OBS_DIR)/dnsfault/state/fault.conf
+# Prometheus discovers its targets through the Docker socket, whose group differs from one host to the next.
+export DOCKER_GID           ?= $(shell stat -c %g /var/run/docker.sock 2>/dev/null || echo 0)
+# Only the storage endpoint's queries are disturbed, search-list expansions included.
+MATCH                       ?= storage\.internal
+RATIO                       ?= 0.33
+DELAY_MS                    ?= 300
+IDLE                        ?= 25s
+
+.PHONY: obs/up obs/down obs/seed obs/ps obs/logs obs/urls
+
+##
+## Observability stack (test/observability):
+##
+
+obs/up: ## obs/up : build the dev image, start the stack, fill the buckets, wait until everything is up
+	@[ -f $(OBS_FAULT) ] || printf 'mode=off\n' > $(OBS_FAULT)
+	@$(OBS) up -d --build --wait --wait-timeout 600
+	@$(MAKE) --no-print-directory obs/urls
+
+obs/down: ## obs/down : stop the stack and drop its volumes (buckets, metrics, logs)
+	@$(OBS) down -v --remove-orphans
+	@rm -f $(OBS_FAULT)
+
+obs/seed: ## obs/seed [ SEED_BUCKETS=name:count:min:max,... ] : create or complete the demo buckets
+	@$(OBS) run --rm $${SEED_BUCKETS:+-e BUCKETS=$$SEED_BUCKETS} seed
+
+obs/ps: ## obs/ps : show the stack's containers
+	@$(OBS) ps -a
+
+obs/logs: ## obs/logs [ SERVICE=... ] : follow the stack logs
+	@$(OBS) logs -f $(SERVICE)
+
+obs/urls: ## obs/urls : print the stack's entry points
+	@port=$$(grep -E '^OBS_HTTP_PORT=' $(OBS_DIR)/.env | cut -d= -f2); p=$${OBS_HTTP_PORT:-$$port}; s=$$([ "$$p" = 80 ] || echo ":$$p"); \
+	 echo "Grafana     http://grafana.localhost$$s  (admin/admin)"; \
+	 echo "Dashboard   http://grafana.localhost$$s/d/s3-exporter-table"; \
+	 echo "Prometheus  http://prometheus.localhost$$s"; \
+	 echo "Loki        http://loki.localhost$$s"; \
+	 echo "Alloy       http://alloy.localhost$$s"; \
+	 echo "Exporters   http://{small,medium,large}.exporter.localhost$$s/metrics"; \
+	 echo "Traefik     http://localhost:$${OBS_TRAEFIK_PORT:-8888}"; \
+	 echo "DNS fault   $$(tr '\n' ' ' < $(OBS_FAULT) 2>/dev/null || echo 'mode=off')"
+
+.PHONY: obs/chaos/dns-drop obs/chaos/dns-delay obs/chaos/dns-servfail obs/chaos/s3-down obs/chaos/lb-down \
+	obs/chaos/lb-refuse obs/chaos/lb-idle obs/chaos/off
+
+obs/chaos/dns-drop: ## obs/chaos/dns-drop [ RATIO=0.33 MATCH=... ] : lose that share of DNS queries (resolver timeout)
+	@printf 'mode=drop\nratio=$(RATIO)\nmatch=$(MATCH)\n' > $(OBS_FAULT)
+	@echo "DNS: dropping $(RATIO) of the queries matching $(MATCH)"
+
+obs/chaos/dns-delay: ## obs/chaos/dns-delay [ DELAY_MS=300 MATCH=... ] : slow every matching DNS query down
+	@printf 'mode=delay\ndelay_ms=$(DELAY_MS)\nmatch=$(MATCH)\n' > $(OBS_FAULT)
+	@echo "DNS: delaying the queries matching $(MATCH) by $(DELAY_MS)ms"
+
+obs/chaos/dns-servfail: ## obs/chaos/dns-servfail [ RATIO=1 MATCH=... ] : answer SERVFAIL (fast DNS failure)
+	@printf 'mode=servfail\nratio=$(if $(filter command line,$(origin RATIO)),$(RATIO),1)\nmatch=$(MATCH)\n' > $(OBS_FAULT)
+	@echo "DNS: SERVFAIL on the queries matching $(MATCH)"
+
+obs/chaos/s3-down: ## obs/chaos/s3-down : stop the storage behind the load balancer (the LB answers 503)
+	@$(OBS) stop seaweedfs
+
+obs/chaos/lb-down: ## obs/chaos/lb-down : stop the load balancer (its address no longer answers)
+	@$(OBS) stop lb
+
+obs/chaos/lb-refuse: ## obs/chaos/lb-refuse : keep the LB up with no listener on the S3 port (connection refused)
+	@LB_BIND_PORT=8334 $(OBS) up -d --force-recreate lb
+	@echo "LB: nothing listens on 8333 any more"
+
+obs/chaos/lb-idle: ## obs/chaos/lb-idle [ IDLE=25s ] : set the LB idle timeout; under 30s every probe reconnects and resolves
+	@LB_IDLE_TIMEOUT=$(IDLE) $(OBS) up -d --force-recreate lb
+	@echo "LB: idle timeout $(IDLE)"
+
+obs/chaos/off: ## obs/chaos/off : clear the DNS fault, restart the storage and the LB with its default idle timeout
+	@printf 'mode=off\n' > $(OBS_FAULT)
+	@$(OBS) up -d seaweedfs
+	@$(OBS) up -d --force-recreate lb
+	@echo "All faults cleared"
+
 # —— Docker build —————————————————————————————————————————————————————————————————————————————————————————————————————
 
 _docker-bake/%:

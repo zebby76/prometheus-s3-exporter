@@ -91,6 +91,20 @@ assert_equals webtech_s3_bucket_reachable "$(value_of webtech_s3_bucket_reachabl
 assert_present webtech_s3_bucket_probe_duration_seconds
 assert_present webtech_s3_bucket_probe_age_seconds
 assert_present webtech_s3_bucket_probe_retries_total
+assert_present webtech_s3_bucket_probe_errors_total
+assert_present webtech_s3_bucket_probe_connections_total
+assert_present webtech_s3_bucket_dns_duration_seconds
+assert_present webtech_s3_bucket_dns_failures_total
+
+# Every reason is published from the start, at zero, so increase() sees the
+# first error of each.
+for reason in dns connect_timeout connect read_timeout http_5xx http_4xx other; do
+	if ! grep -q "^webtech_s3_bucket_probe_errors_total{.*reason=\"${reason}\"" <<<"${scrape}"; then
+		echo "FAIL: webtech_s3_bucket_probe_errors_total has no reason=\"${reason}\" series" >&2
+		exit 1
+	fi
+done
+echo "ok: every probe error reason is published"
 
 # The detected source is published as a label so a fallback stays visible.
 if ! grep -q 'webtech_s3_exporter_info{.*source="' <<<"${scrape}"; then

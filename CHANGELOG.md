@@ -20,6 +20,10 @@ notes.
 
 ## [Unreleased]
 
+Nothing pending.
+
+## [5.1.0]
+
 ### Added
 
 - The connectivity probe tells a DNS failure from a network one. botocore prints the same

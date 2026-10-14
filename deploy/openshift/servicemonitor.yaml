@@ -1,0 +1,18 @@
+---
+# User-workload monitoring. One exporter, one target: a ServiceMonitor on its
+# Service. podmonitor.yaml does the same without a Service.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: s3-exporter
+  namespace: s3-exporter
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: s3-exporter
+  endpoints:
+    - port: metrics
+      interval: 30s
+      # A hundred buckets render in well under a second; the default 10 s
+      # leaves room.
+      scrapeTimeout: 10s

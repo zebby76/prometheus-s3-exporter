@@ -4,13 +4,17 @@ import logging
 import time
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
 from exporter import (
     DEFAULT_CONNECTIVITY_INTERVAL_SECONDS,
     BucketSizeCollector,
     Snapshot,
     collect_once,
     load_configuration,
+    positive_number,
 )
+from exporter.errors import REASONS
 from exporter.probe import ProbeResult
 from exporter.sources.base import SourceUnavailable, Usage
 
@@ -76,28 +80,16 @@ def _metric_names(collector):
     return {metric.name for metric in collector.collect()}
 
 
-def test_collect_emits_both_the_new_and_the_deprecated_size():
+def test_collect_emits_the_size_in_bytes_only():
+    # webtech_s3_bucket_size_kbytes was deprecated in 3.2.0 and is gone.
     collector = BucketSizeCollector("ns", "my-bucket")
     collect_once(StubSource(usage=Usage(4446391, 5)), collector, "my-bucket")
 
     names = _metric_names(collector)
     assert "webtech_s3_bucket_size_bytes" in names
-    assert "webtech_s3_bucket_size_kbytes" in names
+    assert "webtech_s3_bucket_size_kbytes" not in names
     assert "webtech_s3_usage_stale_seconds" in names
     assert "webtech_s3_collect_duration_seconds" in names
-
-
-def test_deprecated_gauge_is_the_byte_value_divided_by_a_thousand():
-    collector = BucketSizeCollector("ns", "my-bucket")
-    collect_once(StubSource(usage=Usage(4446391, 5)), collector, "my-bucket")
-
-    values = {
-        metric.name: metric.samples[0].value
-        for metric in collector.collect()
-        if metric.samples
-    }
-    assert values["webtech_s3_bucket_size_bytes"] == 4446391
-    assert values["webtech_s3_bucket_size_kbytes"] == 4446
 
 
 def test_collect_survives_an_empty_snapshot():
@@ -108,7 +100,7 @@ def test_collect_survives_an_empty_snapshot():
 
 def test_missing_configuration_file_yields_defaults():
     settings = load_configuration("/nonexistent/collector.yml")
-    assert settings["interval"] == 1
+    assert settings["interval"] == 5
     assert settings["source"] == "auto"
     assert settings["sources"] == {}
 
@@ -185,9 +177,17 @@ def test_fast_collection_is_not_warned_about(caplog):
 
 
 class StubProbe:
-    def __init__(self, result, retries_total=0):
+    def __init__(
+        self,
+        result,
+        retries_total=0,
+        errors_total=None,
+        connections_total=None,
+    ):
         self.result = result
         self.retries_total = retries_total
+        self.errors_total = errors_total or {reason: 0 for reason in REASONS}
+        self.connections_total = connections_total
 
 
 def test_probe_metrics_are_published_when_a_probe_is_wired():
@@ -209,6 +209,39 @@ def test_probe_metrics_are_published_when_a_probe_is_wired():
     # Published so a reconnection reads as a reconnection instead of hiding in
     # the duration as latency.
     assert values["webtech_s3_bucket_probe_retries_total"] == 7
+
+
+def test_the_probe_diagnostics_are_published():
+    probe = StubProbe(
+        ProbeResult(reachable=True, checked_at=NOW),
+        errors_total={**{reason: 0 for reason in REASONS}, "dns": 3},
+        connections_total=12,
+    )
+    collector = BucketSizeCollector("ns", "my-bucket", 60, probe=probe)
+
+    metrics = {metric.name: metric for metric in collector.collect()}
+
+    errors = {
+        sample.labels["reason"]: sample.value
+        for sample in metrics["webtech_s3_bucket_probe_errors_total"].samples
+    }
+    # Every reason, zeros included, so increase() sees the first error.
+    assert set(errors) == set(REASONS)
+    assert errors["dns"] == 3
+    assert errors["connect"] == 0
+    assert metrics["webtech_s3_bucket_probe_connections_total"].samples[0].value == 12
+    # The DNS is the endpoint's business now, checked once for every bucket.
+    assert not any("dns" in name for name in metrics)
+
+
+def test_connections_are_omitted_when_the_client_cannot_count_them():
+    probe = StubProbe(ProbeResult(reachable=True, checked_at=NOW))
+    collector = BucketSizeCollector("ns", "my-bucket", 60, probe=probe)
+
+    names = {metric.name for metric in collector.collect()}
+
+    assert "webtech_s3_bucket_probe_connections_total" not in names
+    assert "webtech_s3_bucket_probe_errors_total" in names
 
 
 def test_an_unreachable_bucket_is_reported_as_zero():
@@ -279,3 +312,16 @@ def test_environment_override_applies_without_a_configuration_file(monkeypatch):
     settings = load_configuration("/nonexistent/collector.yml")
     assert settings["source"] == "list"
     assert settings["connectivity_interval"] == 5
+
+
+@pytest.mark.parametrize("value", [0, -1, "0", "five", None, ""])
+def test_an_interval_that_cannot_be_honoured_stops_the_start(value):
+    # 0 used to mean no wait at all: about 200 collections a second.
+    with pytest.raises(SystemExit) as stopped:
+        positive_number({"interval": value}, "interval", "minutes")
+    assert stopped.value.code == 1
+
+
+@pytest.mark.parametrize("value, expected", [(5, 5.0), ("2.5", 2.5), (0.05, 0.05)])
+def test_a_positive_interval_is_accepted(value, expected):
+    assert positive_number({"interval": value}, "interval", "minutes") == expected

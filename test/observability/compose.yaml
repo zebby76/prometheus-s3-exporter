@@ -1,0 +1,405 @@
+---
+# Local observability stack: one exporter per bucket, as in production, behind
+# the same kind of path -- a cluster DNS with OpenShift's search list and
+# ndots:5, a load balancer with an idle timeout -- plus Prometheus, Loki and
+# Grafana behind Traefik. Driven from the root Makefile (`make obs/help`).
+#
+#   exporter-* --DNS--> dnsfault --> coredns --> Docker DNS
+#              --S3---> lb (haproxy, :8333 http, :8443 https) --> seaweedfs
+#
+# Traefik, Prometheus, Grafana and Loki come from base-php test/demo-infra.
+
+name: s3-exporter-demo
+
+x-exporter: &exporter
+  build:
+    context: ../..
+    target: dev
+  image: s3-exporter-demo/exporter:dev
+  restart: unless-stopped
+  user: "1001:0"
+  environment: &exporter-env
+    OPENSHIFT_NAMESPACE: demo
+    AWS_ACCESS_KEY_ID: ${S3_ACCESS_KEY}
+    AWS_SECRET_ACCESS_KEY: ${S3_SECRET_KEY}
+    AWS_DEFAULT_REGION: us-east-1
+    # A name that only the cluster DNS knows, so every resolution walks the
+    # search list through dnsfault and CoreDNS.
+    AWS_ENDPOINT_URL: http://s3.storage.internal:8333
+  volumes:
+    # The directory, as a ConfigMap is best mounted: an edit is reloaded.
+    - ./exporter:/app/config:ro
+    - ./exporter/resolv.conf:/etc/resolv.conf:ro
+  depends_on:
+    seed:
+      condition: service_completed_successfully
+    dnsfault:
+      condition: service_started
+    lb:
+      condition: service_started
+  mem_limit: 128m
+  # A CPU limit, as a pod has: without a CFS quota there is nothing to
+  # throttle, and the dashboard's Throttled column stays empty.
+  cpus: 0.5
+
+x-exporter-labels: &exporter-labels
+  prometheus-scrape: "true"
+  prometheus-port: "9773"
+  prometheus-job: s3-exporter
+  traefik.enable: "true"
+
+services:
+  traefik:
+    image: traefik:v3.6
+    restart: unless-stopped
+    command:
+      - "--log.level=WARNING"
+      - "--api.insecure=true"
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--providers.docker.network=s3-exporter-demo"
+      - "--entrypoints.web.address=:80"
+    ports:
+      - "${OBS_HTTP_PORT:-80}:80"
+      - "${OBS_TRAEFIK_PORT:-8888}:8080"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+
+  prometheus:
+    image: docker.io/prom/prometheus:v3.5.5
+    # Reads the Docker socket for service discovery; its group differs from one
+    # host to the next, so the Makefile passes it in.
+    user: "65534:65534"
+    group_add:
+      - "${DOCKER_GID:-0}"
+    restart: unless-stopped
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=7d"
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.prom.rule: Host(`prometheus.localhost`)
+      traefik.http.routers.prom.entrypoints: web
+      traefik.http.services.prom.loadbalancer.server.port: "9090"
+    read_only: true
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:9090/-/healthy"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+    mem_limit: 512m
+
+  loki:
+    image: docker.io/grafana/loki:3.7.6
+    restart: unless-stopped
+    command: -config.file=/etc/loki/loki-config.yaml
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.loki.rule: Host(`loki.localhost`)
+      traefik.http.routers.loki.entrypoints: web
+      traefik.http.services.loki.loadbalancer.server.port: "3100"
+    read_only: true
+    tmpfs:
+      - /tmp:rw,size=64m
+    volumes:
+      - ./loki/loki-config.yaml:/etc/loki/loki-config.yaml:ro
+      - loki-data:/loki
+    mem_limit: 512m
+
+  alloy:
+    image: docker.io/grafana/alloy:v1.20.1
+    restart: unless-stopped
+    command:
+      - run
+      - --server.http.listen-addr=0.0.0.0:12345
+      - --storage.path=/var/lib/alloy/data
+      - /etc/alloy/config.alloy
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.alloy.rule: Host(`alloy.localhost`)
+      traefik.http.routers.alloy.entrypoints: web
+      traefik.http.services.alloy.loadbalancer.server.port: "12345"
+    volumes:
+      - ./alloy/config.alloy:/etc/alloy/config.alloy:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - alloy-data:/var/lib/alloy/data
+    depends_on:
+      - loki
+    mem_limit: 256m
+
+  grafana:
+    # The version the production dashboard was built on, so what works here
+    # works there. Going down from a newer Grafana needs `make obs/down` first:
+    # Grafana cannot read a database a newer version has migrated.
+    image: docker.io/grafana/grafana-oss:10.2.3
+    restart: unless-stopped
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Viewer
+      - GF_UPDATE_CHECKS_ENABLED=false
+      - GF_ANALYTICS_REPORTING_ENABLED=false
+    depends_on:
+      prometheus:
+        condition: service_healthy
+      loki:
+        condition: service_started
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.grafana.rule: Host(`grafana.localhost`)
+      traefik.http.routers.grafana.entrypoints: web
+      traefik.http.services.grafana.loadbalancer.server.port: "3000"
+    read_only: true
+    tmpfs:
+      - /tmp:rw,exec,size=128m,mode=1777
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    mem_limit: 512m
+
+  # Container CPU and memory, which the dashboard joins to each bucket on
+  # (namespace, pod) as it does with the kubelet's cAdvisor on OpenShift.
+  # prometheus.yml relabels its series into that shape, with the container ID
+  # standing in for the pod name.
+  #
+  # Its Docker and containerd support are pointed at nothing on purpose: with
+  # Docker's containerd image store, the Docker support claims every container
+  # and then fails to read its layers, and the containers vanish. Left to the
+  # raw cgroup support, each one shows up as /docker/<id>.
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:v0.52.1
+    restart: unless-stopped
+    privileged: true
+    command:
+      - --docker_only=false
+      - --docker=unix:///nonexistent/docker.sock
+      - --containerd=/nonexistent/containerd.sock
+      - --housekeeping_interval=10s
+      - --disable_metrics=advtcp,cpu_topology,cpuset,disk,diskIO,hugetlb,memory_numa,network,percpu,perf_event,process,referenced_memory,resctrl,sched,tcp,udp
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+    devices:
+      - /dev/kmsg
+    mem_limit: 256m
+
+  # —— Storage path ——————————————————————————————————————————————————————————
+
+  seaweedfs:
+    image: docker.io/chrislusf/seaweedfs:4.47
+    restart: unless-stopped
+    environment:
+      - AWS_ACCESS_KEY_ID=${S3_ACCESS_KEY}
+      - AWS_SECRET_ACCESS_KEY=${S3_SECRET_KEY}
+    command: server -dir=/data -s3 -ip.bind=0.0.0.0
+    volumes:
+      - seaweedfs-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf -o /dev/null http://localhost:8333/status"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    mem_limit: 1g
+
+  # The load balancer in front of the storage; its idle timeout is the one
+  # that closes the probe's keep-alive connection.
+  lb:
+    image: docker.io/library/haproxy:3.2
+    restart: unless-stopped
+    environment:
+      - LB_IDLE_TIMEOUT=${LB_IDLE_TIMEOUT:-60s}
+      - LB_BIND_PORT=${LB_BIND_PORT:-8333}
+      - LB_TLS_CERT=${LB_TLS_CERT:-server.pem}
+    volumes:
+      - ./haproxy/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+      # Made by `make obs/up` (tls/make-certs.sh), never committed.
+      - ./tls/out:/tls:ro
+    networks:
+      default:
+        # Served by CoreDNS as s3.storage.internal.
+        ipv4_address: 172.31.53.80
+    mem_limit: 128m
+
+  # The cluster DNS.
+  coredns:
+    image: docker.io/coredns/coredns:1.12.1
+    restart: unless-stopped
+    command: ["-conf", "/etc/coredns/Corefile"]
+    labels:
+      prometheus-scrape: "true"
+      prometheus-port: "9153"
+      prometheus-job: coredns
+    volumes:
+      - ./coredns/Corefile:/etc/coredns/Corefile:ro
+    mem_limit: 64m
+
+  # Between the pods and the cluster DNS, where conntrack and the service DNAT
+  # sit in production: loses, delays or SERVFAILs queries on demand.
+  dnsfault:
+    image: docker.io/library/python:3.12-slim-trixie
+    restart: unless-stopped
+    command: ["python3", "-u", "/app/dnsfault.py"]
+    environment:
+      - DNSFAULT_UPSTREAM=coredns
+      - FAULT_FILE=/state/fault.conf
+    volumes:
+      - ./dnsfault/dnsfault.py:/app/dnsfault.py:ro
+      - ./dnsfault/state:/state:ro
+    depends_on:
+      - coredns
+    networks:
+      default:
+        ipv4_address: 172.31.53.53
+    mem_limit: 64m
+
+  # Creates the buckets and fills them, straight against SeaweedFS, then exits.
+  seed:
+    # Same build as the exporters: the dev image has boto3.
+    build:
+      context: ../..
+      target: dev
+    image: s3-exporter-demo/exporter:dev
+    entrypoint: ["python3", "-u", "/seed/seed.py"]
+    environment:
+      - AWS_ACCESS_KEY_ID=${S3_ACCESS_KEY}
+      - AWS_SECRET_ACCESS_KEY=${S3_SECRET_KEY}
+      - AWS_DEFAULT_REGION=us-east-1
+      - AWS_ENDPOINT_URL=http://seaweedfs:8333
+      - BUCKETS=${SEED_BUCKETS:-}
+    volumes:
+      - ./seed/seed.py:/seed/seed.py:ro
+    depends_on:
+      seaweedfs:
+        condition: service_healthy
+    restart: "no"
+
+  # —— One exporter per bucket ———————————————————————————————————————————————
+
+  exporter-small:
+    <<: *exporter
+    environment:
+      <<: *exporter-env
+      S3_BUCKET_NAME: bucket-small
+    labels:
+      <<: *exporter-labels
+      traefik.http.routers.exporter-small.rule: Host(`small.exporter.localhost`)
+      traefik.http.services.exporter-small.loadbalancer.server.port: "9773"
+
+  exporter-medium:
+    <<: *exporter
+    environment:
+      <<: *exporter-env
+      S3_BUCKET_NAME: bucket-medium
+    labels:
+      <<: *exporter-labels
+      traefik.http.routers.exporter-medium.rule: Host(`medium.exporter.localhost`)
+      traefik.http.services.exporter-medium.loadbalancer.server.port: "9773"
+
+  exporter-large:
+    <<: *exporter
+    environment:
+      <<: *exporter-env
+      S3_BUCKET_NAME: bucket-large
+    labels:
+      <<: *exporter-labels
+      traefik.http.routers.exporter-large.rule: Host(`large.exporter.localhost`)
+      traefik.http.services.exporter-large.loadbalancer.server.port: "9773"
+
+  # The same path over TLS, trusting the demo CA as AWS_CA_BUNDLE: the
+  # endpoint check adds a handshake phase, and make obs/chaos/tls-* break it.
+  exporter-tls:
+    <<: *exporter
+    environment:
+      <<: *exporter-env
+      S3_BUCKET_NAME: bucket-tls
+      AWS_ENDPOINT_URL: https://s3.storage.internal:8443
+      AWS_CA_BUNDLE: /tls/ca.pem
+    volumes:
+      # The directory, as a ConfigMap is best mounted: an edit is reloaded.
+      - ./exporter:/app/config:ro
+      - ./exporter/resolv.conf:/etc/resolv.conf:ro
+      - ./tls/out/ca.pem:/tls/ca.pem:ro
+    labels:
+      <<: *exporter-labels
+      traefik.http.routers.exporter-tls.rule: Host(`tls.exporter.localhost`)
+      traefik.http.services.exporter-tls.loadbalancer.server.port: "9773"
+
+  # —— One exporter for many buckets, as in 6.0.0 ————————————————————————————
+
+  # The cluster's API server, as far as the exporter needs one: Secrets by
+  # namespace and name, a Role per application namespace (403 without it), the
+  # ServiceAccount's token. State in kube/state, changed by make obs/kube/*.
+  kube-api:
+    image: docker.io/library/python:3.12-slim-trixie
+    restart: unless-stopped
+    command: ["python3", "-u", "/app/fake_kube.py"]
+    environment:
+      - KUBE_STATE=/state
+      - KUBE_CERT=/tls/kube-api.pem
+    volumes:
+      - ./kube/fake_kube.py:/app/fake_kube.py:ro
+      - ./kube/state:/state:ro
+      - ./tls/out/kube-api.pem:/tls/kube-api.pem:ro
+    mem_limit: 64m
+
+  # Its buckets' credentials come from Secrets in three application
+  # namespaces, read through the API with its ServiceAccount; two come from
+  # envFrom with a prefix, the fallback. Its collector.yml is a ConfigMap
+  # volume: make obs/kube/config-* change it, and it reloads.
+  exporter-multi:
+    <<: *exporter
+    environment:
+      <<: *exporter-env
+      KUBERNETES_SERVICE_HOST: kube-api
+      KUBERNETES_SERVICE_PORT: "6443"
+      # bucket-tls is reached over TLS; the http endpoint ignores it.
+      AWS_CA_BUNDLE: /tls/ca.pem
+      APP_C_MEDIA_S3_KEY: ${S3_ACCESS_KEY}
+      APP_C_MEDIA_S3_SECRET: ${S3_SECRET_KEY}
+      APP_C_MEDIA_S3_BUCKET: app-c-media
+      APP_C_EXPORTS_S3_KEY: ${S3_ACCESS_KEY}
+      APP_C_EXPORTS_S3_SECRET: ${S3_SECRET_KEY}
+      APP_C_EXPORTS_S3_BUCKET: app-c-exports
+    volumes:
+      - ./kube/state/config:/app/config:ro
+      - ./kube/state/sa:/var/run/secrets/kubernetes.io/serviceaccount:ro
+      - ./exporter/resolv.conf:/etc/resolv.conf:ro
+      - ./tls/out/ca.pem:/tls/ca.pem:ro
+    depends_on:
+      seed:
+        condition: service_completed_successfully
+      dnsfault:
+        condition: service_started
+      lb:
+        condition: service_started
+      kube-api:
+        condition: service_started
+    # A hundred buckets fit in 160 MB; twenty with room to spare.
+    mem_limit: 256m
+    labels:
+      <<: *exporter-labels
+      traefik.http.routers.exporter-multi.rule: Host(`multi.exporter.localhost`)
+      traefik.http.services.exporter-multi.loadbalancer.server.port: "9773"
+
+volumes:
+  prometheus-data:
+  loki-data:
+  alloy-data:
+  grafana-data:
+  seaweedfs-data:
+
+networks:
+  default:
+    name: s3-exporter-demo
+    ipam:
+      config:
+        - subnet: 172.31.53.0/24

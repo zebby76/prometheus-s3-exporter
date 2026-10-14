@@ -13,31 +13,27 @@ services:
     # already populated, so the smoke test can assert on exact figures instead
     # of racing the uploads.
     depends_on:
-      minio:
+      seaweedfs:
         condition: service_healthy
-      minio-init-content:
+      s3-init:
         condition: service_completed_successfully
 
-  minio-init-bucket:
-    image: docker.io/minio/mc:latest
+  # Creates the bucket and uploads test/assets through the S3 API, signed with
+  # the exporter's key pair, then exits.
+  s3-init:
+    image: docker.io/amazon/aws-cli:2.37.5
     depends_on:
-      minio:
+      seaweedfs:
         condition: service_healthy
-    entrypoint: >
-      /bin/sh -c "
-        mc alias set local http://minio:9000 minioadmin minioadmin &&
-        mc mb -p local/my-bucket
-      "
-
-  minio-init-content:
-    image: docker.io/minio/mc:latest
-    depends_on:
-      minio-init-bucket:
-        condition: service_completed_successfully
+    environment:
+      - AWS_ACCESS_KEY_ID=s3admin
+      - AWS_SECRET_ACCESS_KEY=s3admin-secret
+      - AWS_DEFAULT_REGION=us-east-1
+      - AWS_ENDPOINT_URL=http://seaweedfs:8333
     volumes:
       - ./test/assets:/data-to-upload:ro
-    entrypoint: >
-      /bin/sh -c "
-        mc alias set local http://minio:9000 minioadmin minioadmin &&
-        mc cp --recursive /data-to-upload/ local/my-bucket/
-      "
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        aws s3 mb s3://my-bucket
+        aws s3 cp --recursive --only-show-errors /data-to-upload/ s3://my-bucket/

@@ -153,7 +153,8 @@ class R2Source(UsageSource):
         try:
             candidate.fetch()
         except Exception as exc:
-            logging.debug("Cloudflare R2 usage API unavailable: %s", exc)
+            # Configured, yet failing: worth more than a debug line.
+            logging.warning("Cloudflare R2 usage API unavailable: %s", exc)
             return None
         return candidate
 

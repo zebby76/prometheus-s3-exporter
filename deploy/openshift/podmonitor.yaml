@@ -1,0 +1,16 @@
+---
+# The alternative to service.yaml and servicemonitor.yaml: a PodMonitor
+# selects the pods directly, as one per bucket needed. Use one or the other,
+# not both, or every series is scraped twice.
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: s3-exporter
+  namespace: s3-exporter
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: s3-exporter
+  podMetricsEndpoints:
+    - port: metrics
+      interval: 30s

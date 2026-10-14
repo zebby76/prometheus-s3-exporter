@@ -1,0 +1,32 @@
+---
+# One pair per application namespace whose bucket the exporter watches:
+# `get` on the Secrets it names, and nothing else. Never a ClusterRole on
+# Secrets. Replace app-a and app-a-s3; list several Secrets of the same
+# namespace in resourceNames.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: s3-exporter-read
+  namespace: app-a
+rules:
+  - apiGroups: [""]
+    resources: [secrets]
+    # get only: list or watch would hand out every Secret of the namespace.
+    verbs: [get]
+    resourceNames: [app-a-s3]
+---
+# The subject lives in another namespace: that is allowed, and what lets one
+# exporter read Secrets across the cluster without any cluster-wide right.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: s3-exporter-read
+  namespace: app-a
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: s3-exporter-read
+subjects:
+  - kind: ServiceAccount
+    name: s3-exporter
+    namespace: s3-exporter

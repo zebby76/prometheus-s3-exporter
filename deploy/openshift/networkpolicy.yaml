@@ -1,0 +1,28 @@
+---
+# Ingress only from what needs it: user-workload monitoring on the metrics
+# port, and the kubelet's probes on the health port. Egress stays open: the
+# exporter talks to the storage endpoints, the cluster DNS and the API server.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: s3-exporter
+  namespace: s3-exporter
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: s3-exporter
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: openshift-user-workload-monitoring
+      ports:
+        - port: metrics
+    # The kubelet probes from the node's network.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              policy-group.network.openshift.io/host-network: ""
+      ports:
+        - port: health

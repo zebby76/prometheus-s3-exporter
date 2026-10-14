@@ -83,7 +83,8 @@ class CloudWatchSource(UsageSource):
         try:
             candidate.fetch()
         except Exception as exc:
-            logging.debug("CloudWatch storage metrics unavailable: %s", exc)
+            # Configured, yet failing: worth more than a debug line.
+            logging.warning("CloudWatch storage metrics unavailable: %s", exc)
             return None
         return candidate
 

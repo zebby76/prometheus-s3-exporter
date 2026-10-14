@@ -99,6 +99,6 @@ def test_a_probe_client_that_cannot_be_built_falls_back_to_the_shared_one(monkey
     def boom(*_args, **_kwargs):
         raise RuntimeError("no credentials")
 
-    monkeypatch.setattr(exporter, "build_probe_client", boom)
+    monkeypatch.setattr(exporter.clients, "build_probe_client", boom)
 
     assert probe_client(60) is SHARED

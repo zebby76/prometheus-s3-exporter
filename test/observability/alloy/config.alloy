@@ -1,0 +1,89 @@
+// Grafana Alloy: ships the stdout of every container of this compose project to
+// Loki. base-php tails files from a sidecar; the exporter logs to stdout, so
+// here Alloy reads the Docker daemon instead.
+
+discovery.docker "project" {
+  host = "unix:///var/run/docker.sock"
+  filter {
+    name   = "label"
+    values = ["com.docker.compose.project=s3-exporter-demo"]
+  }
+}
+
+discovery.relabel "project" {
+  targets = discovery.docker.project.targets
+
+  rule {
+    source_labels = ["__meta_docker_container_label_com_docker_compose_service"]
+    target_label  = "service"
+  }
+  rule {
+    source_labels = ["__meta_docker_container_name"]
+    regex         = "/(.*)"
+    target_label  = "container"
+  }
+}
+
+loki.source.docker "project" {
+  host          = "unix:///var/run/docker.sock"
+  targets       = discovery.relabel.project.output
+  relabel_rules = discovery.relabel.project.rules
+  forward_to    = [loki.process.exporter.receiver]
+}
+
+loki.process "exporter" {
+  forward_to = [loki.write.default.receiver]
+
+  stage.match {
+    selector = "{service=~\"exporter-.*\"}"
+
+    // A record starts with the application prefix `[2026-10-13 16:20:17,123]`,
+    // an access line `ts=`, or falcon's `2026-10-13 16:20:17 [FALCON]`; anything
+    // else (a traceback) belongs to the record above it.
+    stage.multiline {
+      firstline     = "^(\\[\\d{4}-|ts=|\\d{4}-\\d{2}-\\d{2} )"
+      max_wait_time = "3s"
+    }
+
+    // Access lines: logfmt, src=exporter.
+    stage.match {
+      selector = "{service=~\"exporter-.*\"} |~ \"^ts=\""
+
+      stage.logfmt {
+        mapping = { rid = "", class = "", status = "" }
+      }
+      // rid is unique per request: structured metadata, never a label.
+      stage.structured_metadata {
+        values = { rid = "" }
+      }
+      // A handful of values each: fine as labels, so `sum by (class, status)`.
+      stage.labels {
+        values = { class = "", status = "" }
+      }
+      stage.static_labels {
+        values = { stream = "access" }
+      }
+    }
+
+    // Application lines: `[ts] logger.LEVEL thread message`.
+    stage.match {
+      selector = "{service=~\"exporter-.*\"} !~ \"^ts=\""
+
+      stage.regex {
+        expression = "^\\[[^\\]]+\\] \\S+?\\.(?P<level>[A-Z]+) "
+      }
+      stage.labels {
+        values = { level = "" }
+      }
+      stage.static_labels {
+        values = { stream = "app" }
+      }
+    }
+  }
+}
+
+loki.write "default" {
+  endpoint {
+    url = "http://loki:3100/loki/api/v1/push"
+  }
+}

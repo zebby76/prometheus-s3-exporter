@@ -8,10 +8,23 @@ figure it already maintains, which costs one request whatever the bucket size.
 
 from __future__ import annotations
 
+import os
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Optional
+
+
+def s3_endpoint_verify():
+    """TLS verification for HTTP calls made to the S3 endpoint's own server.
+
+    boto3 verifies the S3 endpoint against AWS_CA_BUNDLE when it is set;
+    `requests` reads REQUESTS_CA_BUNDLE and ignores it. A grid behind a private
+    CA then answered the S3 calls while the usage extension failed its TLS
+    check, and detection settled silently on the listing. The sources that
+    talk to the same server use the same CA.
+    """
+    return os.getenv("AWS_CA_BUNDLE") or True
 
 
 class SourceUnavailable(Exception):

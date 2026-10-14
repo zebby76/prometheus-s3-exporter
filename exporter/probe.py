@@ -12,9 +12,12 @@ from __future__ import annotations
 import logging
 import threading
 import time
+import weakref
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Dict, Optional
+
+from exporter.errors import REASONS, classify, describe
 
 # Errors that mean "you may not do this", as opposed to "the bucket is not
 # there". They send us to the fallback instead of reporting an outage.
@@ -59,6 +62,8 @@ class ProbeResult:
     checked_at: Optional[datetime] = None
     error: Optional[str] = None
     attempts: int = 0
+    # One of exporter.errors.REASONS when the check failed.
+    reason: Optional[str] = None
 
     def age_seconds(self, now: Optional[datetime] = None) -> float:
         """Seconds since this check ran; 0 before the first one."""
@@ -71,18 +76,32 @@ class ProbeResult:
 class ConnectivityProbe:
     """Answers "can we still reach the bucket" with one cheap request."""
 
-    def __init__(self, client, bucket, interval_seconds=60):
+    def __init__(self, client, bucket, interval_seconds=60, on_error=None, name=None):
         self._client = client
         self._bucket = bucket
+        # What the thread is named after: the bucket, or more when the same
+        # bucket is watched twice.
+        self._name = name or bucket
         self.interval_seconds = interval_seconds
+        # Called with each failed attempt's exception, so the owner can tell a
+        # rejected credential from an outage. Must not raise.
+        self._on_error = on_error
         self._result = ProbeResult()
         # None until the first check decides which call this credential is
         # allowed to make; then it stays put. The label names it in the logs.
         self._method = None
         self._method_label = None
         # Monotonic, and deliberately not reset by set_client(): a counter that
-        # went backwards on a client rebuild would break rate() over it.
+        # went backwards on a client rebuild would break rate() over it. Same
+        # for every counter below.
         self._retries_total = 0
+        # Every failed attempt, retried or not, by where it failed.
+        self._errors_total = {reason: 0 for reason in REASONS}
+        # Sockets seen in the client's pool at the end of the last check; one
+        # that was not there is a connection opened since. None until the pool
+        # has been readable once.
+        self._known_sockets = weakref.WeakSet()
+        self._connections_total: Optional[int] = None
 
     @property
     def result(self) -> ProbeResult:
@@ -93,11 +112,48 @@ class ConnectivityProbe:
         """Immediate retries performed since start, across all checks."""
         return self._retries_total
 
+    @property
+    def errors_total(self) -> Dict[str, int]:
+        """Failed attempts since start, by reason; every reason present."""
+        return dict(self._errors_total)
+
+    @property
+    def connections_total(self) -> Optional[int]:
+        """TCP connections the probe established since start.
+
+        None when the client does not let us see them. A connection is reused
+        between checks; a new one means the previous was closed -- by an idle
+        timeout, typically -- and only a new one resolves the endpoint name
+        again.
+        """
+        return self._connections_total
+
     def set_client(self, client):
         """Adopt a rebuilt S3 client, re-deciding which call to use."""
         self._client = client
         self._method = None
         self._method_label = None
+
+    def _pooled_sockets(self) -> Optional[list]:
+        """Sockets currently held by the client's connection pools, or None.
+
+        Sockets and not urllib3's `num_connections`: that counts connection
+        objects, and urllib3 reconnects a dropped one in place, on a new socket
+        under the same object -- precisely the reconnection worth counting.
+        Read through botocore's private session: best effort, and None rather
+        than an exception when the layout is not the one boto3 1.39 has.
+        """
+        try:
+            pools = self._client._endpoint.http_session._manager.pools
+            sockets = []
+            for key in list(pools.keys()):
+                for conn in list(pools[key].pool.queue):
+                    sock = getattr(conn, "sock", None)
+                    if sock is not None:
+                        sockets.append(sock)
+            return sockets
+        except Exception:
+            return None
 
     def _head_bucket(self):
         self._client.head_bucket(Bucket=self._bucket)
@@ -139,17 +195,24 @@ class ConnectivityProbe:
     def check_once(self) -> ProbeResult:
         """Run one check and publish it. Never raises."""
         started = time.perf_counter()
-        error = None
+        # (seconds, exception) for each attempt that failed.
+        failures = []
         attempts = 0
 
         while attempts < _MAX_ATTEMPTS:
             attempts += 1
+            attempt_started = time.perf_counter()
             try:
                 self._attempt()
-                error = None
                 break
             except Exception as exc:
-                error = f"{type(exc).__name__}: {exc}"
+                failures.append((time.perf_counter() - attempt_started, exc))
+                self._errors_total[classify(exc)] += 1
+                if self._on_error is not None:
+                    try:
+                        self._on_error(exc)
+                    except Exception:
+                        logging.exception("Probe error callback failed")
                 if attempts < _MAX_ATTEMPTS:
                     # Counted, not hidden: a probe that had to reconnect is a
                     # fact about the path, and the whole point of doing this
@@ -157,12 +220,26 @@ class ConnectivityProbe:
                     self._retries_total += 1
 
         duration = time.perf_counter() - started
+        failed = len(failures) == attempts
+        new_connections = self._count_connections()
+
+        error = reason = None
+        if failed:
+            # Every attempt, each with its own time and root cause: the first
+            # one is often the slow one, and the last alone used to be logged.
+            error = "; ".join(
+                f"#{n} {seconds:.3f}s {describe(exc)}"
+                for n, (seconds, exc) in enumerate(failures, start=1)
+            )
+            reason = classify(failures[-1][1])
+
         result = ProbeResult(
-            reachable=error is None,
+            reachable=not failed,
             duration_seconds=duration,
             checked_at=datetime.now(timezone.utc),
             error=error,
             attempts=attempts,
+            reason=reason,
         )
 
         previous = self._result
@@ -172,52 +249,85 @@ class ConnectivityProbe:
         # nothing was settled and HeadBucket is what was tried.
         method = self._method_label or "HeadBucket"
 
-        if error is None:
-            # Debug, not info: one line per interval per instance is a lot of
-            # log for a number the probe_duration_seconds gauge already carries.
-            logging.debug(
-                "Probe S3 Bucket %s via %s in %.3fs (%s attempt%s)",
+        if not failed:
+            notes = []
+            if new_connections:
+                notes.append(
+                    f"{new_connections} new connection"
+                    f"{'' if new_connections == 1 else 's'}"
+                )
+            notes.extend(
+                f"#{n} failed in {seconds:.3f}s: {describe(exc)}"
+                for n, (seconds, exc) in enumerate(failures, start=1)
+            )
+            # A reused connection and a first-try success is the steady state:
+            # debug, since probe_duration_seconds already carries the number.
+            # Anything else is what explains a peak on that graph: info.
+            logging.log(
+                logging.INFO if notes else logging.DEBUG,
+                "Probe S3 Bucket %s via %s in %.3fs (%s attempt%s)%s",
                 self._bucket,
                 method,
                 duration,
                 attempts,
                 "" if attempts == 1 else "s",
+                f": {'; '.join(notes)}" if notes else "",
             )
 
-        if error is not None and previous.reachable:
+        if failed and previous.reachable:
             logging.error(
-                "Bucket %s became unreachable via %s after %.3fs and %s attempts: %s",
+                "Bucket %s became unreachable via %s after %.3fs and %s attempts "
+                "[%s]: %s",
                 self._bucket,
                 method,
                 duration,
                 attempts,
+                reason,
                 error,
             )
-        elif (
-            error is None and previous.checked_at is not None and not previous.reachable
-        ):
+        elif not failed and previous.checked_at is not None and not previous.reachable:
             logging.info("Bucket %s is reachable again", self._bucket)
-        elif error is not None:
+        elif failed:
             # Repeats stay at debug: an outage lasting hours would otherwise
             # fill the log with one identical error per interval.
             logging.debug(
-                "Bucket %s still unreachable via %s after %.3fs and %s attempts: %s",
+                "Bucket %s still unreachable via %s after %.3fs and %s attempts "
+                "[%s]: %s",
                 self._bucket,
                 method,
                 duration,
                 attempts,
+                reason,
                 error,
             )
 
         return result
 
-    def run_until(self, stop: threading.Event):
-        """Probe on the configured period until `stop` is set."""
+    def _count_connections(self) -> int:
+        """Connections opened since the last check, added to the total."""
+        sockets = self._pooled_sockets()
+        if sockets is None:
+            return 0
+        new = sum(1 for sock in sockets if sock not in self._known_sockets)
+        self._known_sockets = weakref.WeakSet(sockets)
+        self._connections_total = (self._connections_total or 0) + new
+        return new
+
+    def run_until(self, stop: threading.Event, initial_delay: float = 0):
+        """Probe on the configured period until `stop` is set.
+
+        `initial_delay` spreads the first checks of many buckets over the
+        first interval, instead of a hundred requests in the same second.
+        """
+        if initial_delay and stop.wait(initial_delay):
+            return
         while not stop.is_set():
             self.check_once()
             stop.wait(self.interval_seconds)
 
-    def start(self, stop: threading.Event) -> Optional[threading.Thread]:
+    def start(
+        self, stop: threading.Event, initial_delay: float = 0
+    ) -> Optional[threading.Thread]:
         """Start the probe thread, or return None when disabled."""
         if not self.interval_seconds:
             logging.info("Connectivity probe disabled")
@@ -225,10 +335,16 @@ class ConnectivityProbe:
 
         thread = threading.Thread(
             target=self.run_until,
-            args=(stop,),
-            name="connectivity-probe",
+            args=(stop, initial_delay),
+            # Named after the bucket: with a hundred probes in one process,
+            # the thread name is what a log line is read by.
+            name=f"probe-{self._name}",
             daemon=True,
         )
         thread.start()
-        logging.info("Connectivity probe started, every %ss", self.interval_seconds)
+        logging.info(
+            "Connectivity probe of %s started, every %ss",
+            self._bucket,
+            self.interval_seconds,
+        )
         return thread

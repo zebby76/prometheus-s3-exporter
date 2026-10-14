@@ -1,5 +1,6 @@
 import json
 import logging
+import socketserver
 import threading
 import time
 import uuid
@@ -38,6 +39,13 @@ DEFAULT_PROXY_HEADERS = {
 # Apache renders a missing header or note as a bare dash; keep that so both
 # tiers can be read by one parser without special cases.
 _ABSENT = "-"
+
+# Seconds a connection may sit without sending anything before it is dropped.
+# Each connection has a thread of its own (ThreadingWSGIServer), so a silent
+# client no longer holds anyone else up; this is what keeps a burst of them
+# from piling up threads. Well above what a scrape or a probe needs to send a
+# request line.
+CONNECTION_TIMEOUT_SECONDS = 10
 
 
 def _quote(value):
@@ -92,6 +100,9 @@ class LogfmtRequestHandler(simple_server.WSGIRequestHandler):
     # wsgiref instantiates the handler itself, once per request.
     proxy_headers = DEFAULT_PROXY_HEADERS
 
+    # Read by socketserver.StreamRequestHandler.setup() as the socket timeout.
+    timeout = CONNECTION_TIMEOUT_SECONDS
+
     def get_environ(self):
         # Called once per request, immediately before the app runs, so it
         # measures the application and the response write -- not the wait for
@@ -121,9 +132,12 @@ class LogfmtRequestHandler(simple_server.WSGIRequestHandler):
         target, _, query = self.path.partition("?")
         proxy = self.proxy_headers
 
+        # Every value a client can send is quoted: unquoted, a header such as
+        # `X-Request-Id: abc status=500 src=admin` added keys of its own to the
+        # line, and a parser keeping the first occurrence believed them.
         fields = [
             ("ts", self._timestamp(), False),
-            ("rid", getattr(self, "_rid", _ABSENT), False),
+            ("rid", getattr(self, "_rid", _ABSENT), True),
             ("class", _TRAFFIC_CLASSES.get(target, "other"), False),
             ("src", "exporter", False),
             ("status", code, False),
@@ -134,11 +148,11 @@ class LogfmtRequestHandler(simple_server.WSGIRequestHandler):
             ("target", target or _ABSENT, True),
             # Apache's %B is 0 for an empty body, where wsgiref passes "-".
             ("bytes", 0 if size == "-" else size, False),
-            ("host", self._header("Host"), False),
-            ("via", self._header(proxy["via"]), False),
-            ("vxid", self._header(proxy["vxid"]), False),
+            ("host", self._header("Host"), True),
+            ("via", self._header(proxy["via"]), True),
+            ("vxid", self._header(proxy["vxid"]), True),
             ("xff", self._header(proxy["xff"]), True),
-            ("proto", self._header(proxy["proto"]), False),
+            ("proto", self._header(proxy["proto"]), True),
             ("ua", self._header("User-agent"), True),
         ]
 
@@ -169,35 +183,57 @@ class HealthMetricsHandler:
         resp.text = '{"status": true}'
 
 
-class ReadinessHandler:
-    """Readiness: can the bucket be reached, per the connectivity probe."""
+def probe_state(name, result) -> dict:
+    """A bucket's /readyz entry from its last probe result."""
+    if result.checked_at is None:
+        # Not probed yet: nothing to report against.
+        return {"name": name, "state": "unknown"}
+    if result.reachable:
+        return {"name": name, "state": "reachable"}
+    return {
+        "name": name,
+        "state": "unreachable",
+        "reason": result.reason,
+        "error": result.error,
+        "age_seconds": round(result.age_seconds(), 1),
+    }
 
-    def __init__(self, probe):
-        self._probe = probe
+
+# States that count against readiness. `unknown` does not: holding the pod out
+# of service on no evidence would be worse than serving what it has.
+_FAILING = frozenset({"unreachable", "unconfigured"})
+
+
+class ReadinessHandler:
+    """Readiness: can the buckets be reached, per their connectivity probes.
+
+    503 only when every bucket fails. The pod serves the metrics of all its
+    buckets, so one unreachable bucket out of a hundred must not take the
+    other ninety-nine out of service with it. With a single bucket this is
+    the behaviour it always had.
+    """
+
+    def __init__(self, states, endpoints=None):
+        # A callable returning {bucket key: state entry}.
+        self._states = states
+        # A callable returning {endpoint: state entry}, or None. Shown, never
+        # counted: an endpoint that is down already shows as unreachable
+        # buckets, and a failed handshake while the probes still pass on their
+        # open connections must not take the pod out of service.
+        self._endpoints = endpoints
 
     def on_get(self, _req, resp):
         resp.set_header("Content-Type", "application/json")
-        result = self._probe.result
-
-        if result.checked_at is None:
-            # Not probed yet: nothing to report against, so do not hold the
-            # pod out of service on the strength of no evidence.
-            resp.text = '{"status": true, "bucket": "unknown"}'
-            return
-
-        if result.reachable:
-            resp.text = '{"status": true, "bucket": "reachable"}'
-            return
-
-        resp.status = falcon.HTTP_503
-        resp.text = json.dumps(
-            {
-                "status": False,
-                "bucket": "unreachable",
-                "error": result.error,
-                "age_seconds": round(result.age_seconds(), 1),
-            }
+        buckets = self._states()
+        failing = bool(buckets) and all(
+            entry["state"] in _FAILING for entry in buckets.values()
         )
+        if failing:
+            resp.status = falcon.HTTP_503
+        body = {"status": not failing, "buckets": buckets}
+        if self._endpoints is not None:
+            body["endpoints"] = self._endpoints()
+        resp.text = json.dumps(body)
 
 
 class CustomMetricsHandler:
@@ -226,47 +262,60 @@ class CustomMetricsHandler:
         resp.text = output
 
 
+class ThreadingWSGIServer(socketserver.ThreadingMixIn, simple_server.WSGIServer):
+    """One thread per connection.
+
+    wsgiref's server answers one request at a time, with no timeout: a single
+    client that connected and sent nothing -- a port scan, a TCP-only load
+    balancer check -- held every other request until it left. On the health
+    port that meant the liveness probe timing out and the pod restarted, losing
+    the very metrics /healthz exists to protect.
+    """
+
+    # A stuck connection must not keep the process alive at shutdown.
+    daemon_threads = True
+
+
+def _serve(api, addr, port, name):
+    """Start a threaded server for `api` in the background and return it."""
+    _access_logger()
+    httpd = simple_server.make_server(
+        addr,
+        port,
+        api,
+        server_class=ThreadingWSGIServer,
+        handler_class=LogfmtRequestHandler,
+    )
+    thread = threading.Thread(target=httpd.serve_forever, name=name, daemon=True)
+    thread.start()
+    return httpd
+
+
 def exporter(port=9773, addr="0.0.0.0"):
-
-    global LOGGER
-
-    logging.basicConfig(level=logging.DEBUG)
-    LOGGER = logging.getLogger(__name__)
-
+    """Serve /metrics; returns the server, whose port is server_port."""
     api = falcon.App()
     api.add_route("/metrics", CustomMetricsHandler())
 
-    _access_logger()
-    httpd = simple_server.make_server(
-        addr, port, api, handler_class=LogfmtRequestHandler
-    )
-    t = threading.Thread(target=httpd.serve_forever)
-    t.daemon = True
-    LOGGER.debug("Start Prometheus Exporter Listener on %s:%s/metrics ", addr, port)
-    t.start()
+    httpd = _serve(api, addr, port, "metrics-listener")
+    logging.debug("Start Prometheus Exporter Listener on %s:%s/metrics", addr, port)
+    return httpd
 
 
-def health(port=9774, addr="0.0.0.0", probe=None):
+def health(port=9774, addr="0.0.0.0", readiness=None, endpoints=None):
+    """Serve /healthz (and /readyz with probes); returns the server.
 
-    global LOGGER
-
-    logging.basicConfig(level=logging.DEBUG)
-    LOGGER = logging.getLogger(__name__)
-
+    `readiness` is a callable returning {bucket key: state entry}; `endpoints`
+    one returning {endpoint: state entry}, for information only.
+    """
     api = falcon.App()
     api.add_route("/healthz", HealthMetricsHandler())
-    # Only routed when a probe exists: without one there is nothing to base a
+    # Only routed when the probes run: without them there is nothing to base a
     # readiness answer on.
-    if probe is not None:
-        api.add_route("/readyz", ReadinessHandler(probe))
+    if readiness is not None:
+        api.add_route("/readyz", ReadinessHandler(readiness, endpoints))
 
-    _access_logger()
-    httpd = simple_server.make_server(
-        addr, port, api, handler_class=LogfmtRequestHandler
+    httpd = _serve(api, addr, port, "health-listener")
+    logging.debug(
+        "Start Prometheus Exporter Health Listener on %s:%s/healthz", addr, port
     )
-    t = threading.Thread(target=httpd.serve_forever)
-    t.daemon = True
-    LOGGER.debug(
-        "Start Prometheus Exporter Health Listener on %s:%s/healthz ", addr, port
-    )
-    t.start()
+    return httpd

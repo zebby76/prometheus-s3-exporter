@@ -1,8 +1,10 @@
 ---
 kind: PrometheusExporterConfig
 configuration:
-  # Minutes between two collections.
-  - interval: 1
+  # Minutes between two collections, above 0. A bucket size is a capacity
+  # figure; with the `list` source every cycle costs one request per 1000
+  # objects -- see "Sizing the interval" in the README.
+  - interval: 5
 
   # Where the usage figures come from.
   #   auto        detect at startup: storagegrid, minio, cloudwatch, r2, then list
@@ -14,12 +16,21 @@ configuration:
   # Overridable at runtime with the COLLECTOR_SOURCE environment variable.
   - source: auto
 
-  # Consecutive collection failures before the source is detected again.
+  # Consecutive collection failures before the source is detected again --
+  # except while the connectivity probe says the bucket is unreachable: then
+  # the storage is down, not the source, and the source is kept.
   - max_failures: 3
+
+  # Seconds between two detection attempts while running on the listing
+  # fallback (`list` when something cheaper was asked for), so that a drop to
+  # the listing is never permanent. 0 disables it.
+  - redetect_interval: 3600
 
   # Seconds between two bucket reachability probes, on their own thread and
   # their own clock. One cheap request each, so this can stay frequent even
-  # when `interval` is measured in hours. 0 disables the probe and /readyz.
+  # when `interval` is measured in hours. Also the period of the endpoint
+  # checks (DNS, TCP, TLS), once per endpoint whatever the number of buckets.
+  # 0 disables the probes, the endpoint checks and /readyz.
   # Overridable with COLLECTOR_CONNECTIVITY_INTERVAL.
   #
   # Keep this under the idle timeout of whatever sits in front of the storage
@@ -33,7 +44,8 @@ configuration:
   # Clamped to a quarter of `connectivity_interval`, so a whole check -- two
   # attempts of connect plus read -- always fits inside one cycle. botocore
   # retries are off: its backoff sleeps a random fraction of a second that would
-  # be recorded as latency. The probe retries once itself, immediately.
+  # be recorded as latency. The probe retries once itself, immediately. The
+  # endpoint checks allow it per phase, for TCP and TLS.
   - probe_timeout: 5
 
   # Headers the access log reads for its four correlation fields, so the
@@ -50,6 +62,14 @@ configuration:
   # it, one transient failure at a 60 minute interval leaves the figures stale
   # for a full hour.
   - retry_interval: 300
+
+  # Seconds between two reads of this file. A changed `buckets` list (or
+  # `secret_keys`) is applied without a restart: only the buckets that changed
+  # move. Other settings need a restart. A content that cannot be honoured is
+  # rejected and the configuration in force kept. 0 reads it on SIGHUP only.
+  # Mount the ConfigMap as a directory: with subPath, Kubernetes never updates
+  # the file. See "Reloading the configuration" in README.md.
+  - config_reload_interval: 60
 
   # Per-source settings. minio and cloudwatch stay inactive until configured,
   # because both need credentials beyond the S3 key pair the exporter uses.
@@ -73,3 +93,24 @@ configuration:
       #   # Only for a bucket created in a jurisdiction (eu, fedramp): without it
       #   # the API answers 404 rather than a wrong figure.
       #   jurisdiction: eu
+
+  # One exporter for a list of buckets (6.0.0). Without `buckets`,
+  # the exporter watches the one bucket S3_BUCKET_NAME names. With it, `interval`
+  # defaults to 60 minutes: probes come first, sizes are background work.
+  # See "Multi-bucket configuration" in README.md.
+  #
+  # - max_concurrent_collections: 2   # collections running at once
+  # - credentials_refresh: 300        # seconds between two reads of the Secrets
+  #
+  # - secret_keys:                # key names inside the Secrets (and variable
+  #     access_key: S3_KEY        # suffixes with env_prefix); defaults are
+  #     secret_key: S3_SECRET     # AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY and
+  #     bucket: S3_BUCKET         # S3_BUCKET_NAME
+  # - buckets:
+  #     - secret: app-a-s3        # read through the Kubernetes API; needs a Role
+  #       namespace: app-a        # with `get` on this Secret, in its namespace
+  #     - secret: huge-s3
+  #       namespace: app-b
+  #       collect: false          # probed, never listed (also: interval, source)
+  #     - env_prefix: APP_C_      # variables set by envFrom with prefix APP_C_
+  #       namespace: app-c

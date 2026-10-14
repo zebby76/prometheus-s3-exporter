@@ -20,6 +20,13 @@ notes.
 
 ## [Unreleased]
 
+Nothing pending.
+
+## [6.1.0]
+
+Buckets found by label: a selector instead of one entry per Secret. Nothing changes for an existing
+configuration.
+
 ### Added
 
 - **Buckets found by label.** A `buckets` entry can name a label selector and one or more

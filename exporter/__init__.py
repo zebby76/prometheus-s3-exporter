@@ -25,6 +25,7 @@ from exporter.clients import (  # noqa: F401 -- re-exported
     probe_timeout_for,
 )
 from exporter.credentials import CredentialsUnavailable
+from exporter.endpoints import EndpointRegistry
 from exporter.handler import (
     DEFAULT_PROXY_HEADERS,
     exporter,
@@ -361,9 +362,20 @@ def main():
         len(monitors),
     )
 
+    endpoints = None
+    if connectivity_interval:
+        # From the configuration alone: the endpoints are checked even while no
+        # Secret is readable yet.
+        endpoints = EndpointRegistry(
+            connectivity_interval,
+            monitor_settings.probe_timeout,
+            spread=len(specs) > 1,
+        )
+        endpoints.sync(monitor.endpoint for monitor in monitors)
+
     scheduler = CollectionScheduler(monitors, max_workers, STOP)
     refresher.on_change = scheduler.wake
-    REGISTRY.register(ExporterCollector(monitors, scheduler, __version__))
+    REGISTRY.register(ExporterCollector(monitors, scheduler, __version__, endpoints))
 
     set_proxy_headers(settings["proxy_headers"])
     exporter(port=9773)
@@ -374,6 +386,7 @@ def main():
             if connectivity_interval
             else None
         ),
+        endpoints=endpoints.readiness if endpoints is not None else None,
     )
 
     refresher.start()
@@ -385,6 +398,8 @@ def main():
         pass
 
     scheduler.shutdown()
+    if endpoints is not None:
+        endpoints.stop()
     for monitor in monitors:
         monitor.stop()
     shutdown()

@@ -201,6 +201,7 @@ class Shown(Watched):
         super().__init__(key, 0, configured=configured)
         self.bucket = bucket if configured else None
         self.source_name = "list"
+        self.endpoint = "https://grid:8082"
         self.fail = fail
 
     def rows(self):
@@ -238,11 +239,26 @@ class SchedulerStub:
         return 2
 
 
-def families(monitors):
-    return {
-        family.name: family
-        for family in ExporterCollector(monitors, SchedulerStub(), "6.0.0").collect()
-    }
+class EndpointsStub:
+    def __init__(self, fail=False):
+        self.fail = fail
+
+    def rows(self):
+        if self.fail:
+            raise RuntimeError("broken")
+        return [
+            [
+                ["webtech_s3", "endpoint_up"],
+                {"endpoint": "https://grid:8082"},
+                1,
+                "h",
+            ]
+        ]
+
+
+def families(monitors, endpoints=None):
+    collector = ExporterCollector(monitors, SchedulerStub(), "6.0.0", endpoints)
+    return {family.name: family for family in collector.collect()}
 
 
 def test_every_bucket_lands_in_one_family_per_metric():
@@ -272,6 +288,7 @@ def test_info_has_one_series_per_watched_bucket():
         "name": "uploads",
         "version": "6.0.0",
         "source": "list",
+        "endpoint": "https://grid:8082",
     }
 
 
@@ -281,3 +298,19 @@ def test_one_broken_bucket_marks_the_exporter_down_but_shows_the_rest():
     assert shown["webtech_s3_exporter_up"].samples[0].value == 0
     names = [s.labels["name"] for s in shown["webtech_s3_bucket_size_bytes"].samples]
     assert names == ["uploads"]
+
+
+def test_the_endpoints_are_shown_once_for_all_their_buckets():
+    shown = families(
+        [Shown("a", "uploads"), Shown("b", "archive")], endpoints=EndpointsStub()
+    )
+
+    (sample,) = shown["webtech_s3_endpoint_up"].samples
+    assert sample.labels == {"endpoint": "https://grid:8082"}
+
+
+def test_broken_endpoints_mark_the_exporter_down_but_keep_the_buckets():
+    shown = families([Shown("a", "uploads")], endpoints=EndpointsStub(fail=True))
+
+    assert shown["webtech_s3_exporter_up"].samples[0].value == 0
+    assert "webtech_s3_bucket_size_bytes" in shown

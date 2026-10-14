@@ -20,6 +20,7 @@ from exporter import sources
 from exporter.buckets import BucketSpec
 from exporter.clients import build_probe_client, build_s3_client
 from exporter.credentials import CredentialsUnavailable, ResolvedCredentials
+from exporter.endpoints import endpoint_id
 from exporter.errors import describe, is_credentials_error
 from exporter.handler import probe_state
 from exporter.metrics import (
@@ -160,6 +161,9 @@ class BucketMonitor:
         # A retry must never outlast the interval it is meant to shorten.
         self.retry_seconds = min(settings.retry_seconds, self.interval_seconds)
         self.requested_source = spec.source or settings.source
+        # Known from the configuration alone, before any Secret is read: the
+        # endpoint is checked whether or not the bucket's credentials are.
+        self.endpoint = endpoint_id(spec.endpoint_url, spec.region)
 
         # Taken for every change of state. A collection reads what it needs
         # under it and runs outside it: a 30-minute listing must not hold up a
@@ -484,10 +488,14 @@ class BucketMonitor:
 class ExporterCollector:
     """Every watched bucket's metrics, one family per metric, plus the exporter's."""
 
-    def __init__(self, monitors: List[BucketMonitor], scheduler, version: str):
+    def __init__(
+        self, monitors: List[BucketMonitor], scheduler, version: str, endpoints=None
+    ):
         self.monitors = monitors
         self.scheduler = scheduler
         self.version = version
+        # The EndpointRegistry, or None when the probes are off.
+        self.endpoints = endpoints
 
     def collect(self):
         rows = []
@@ -509,8 +517,20 @@ class ExporterCollector:
                 configured += 1
                 info.add_metric(
                     [monitor.spec.label_namespace, monitor.bucket or ""],
-                    {"version": self.version, "source": monitor.source_name},
+                    {
+                        "version": self.version,
+                        "source": monitor.source_name,
+                        # Joins a bucket to its webtech_s3_endpoint_* series.
+                        "endpoint": monitor.endpoint or "",
+                    },
                 )
+
+        if self.endpoints is not None:
+            try:
+                rows += self.endpoints.rows()
+            except Exception as exc:
+                succeeded = False
+                logging.error("Metrics of the endpoints: %s", exc)
 
         for state, count in (
             ("configured", configured),

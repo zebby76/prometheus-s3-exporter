@@ -254,10 +254,8 @@ used to land in `exported_namespace`.
 | `webtech_s3_bucket_probe_retries_total` | probes that had to reconnect, since start |
 | `webtech_s3_bucket_probe_errors_total{reason}` | failed probe attempts by reason, retried ones included |
 | `webtech_s3_bucket_probe_connections_total` | TCP connections the probe established |
-| `webtech_s3_bucket_dns_duration_seconds` | duration of the last resolution of the endpoint name |
-| `webtech_s3_bucket_dns_failures_total` | resolutions of the endpoint name that failed |
 | `webtech_s3_exporter_status` | 1 when the last collection succeeded |
-| `webtech_s3_exporter_info{version, source}` | one series per watched bucket |
+| `webtech_s3_exporter_info{version, source, endpoint}` | one series per watched bucket; `endpoint` joins it to the endpoint metrics |
 | `webtech_s3_bucket_configured{bucket_key}` | 1 when the bucket's credentials could be read; `name` is empty until then |
 | `webtech_s3_buckets{state}` | buckets `configured` and `unconfigured` |
 | `webtech_s3_collections_running` | collections in progress |
@@ -266,6 +264,23 @@ used to land in `exported_namespace`.
 
 A probe-only bucket (`collect: false`) has no size, count or collection
 metrics.
+
+The endpoints the buckets live on are checked once each, whatever the number of
+buckets on them (see [Where it breaks](#where-it-breaks-dns--tcp--tls--s3)).
+Their metrics are labelled `{endpoint}`, as `scheme://host:port`:
+
+| Metric | Meaning |
+| --- | --- |
+| `webtech_s3_endpoint_up` | 1 when the last check passed every phase |
+| `webtech_s3_endpoint_check_age_seconds` | age of the last check |
+| `webtech_s3_endpoint_dns_duration_seconds` | duration of the resolution of the endpoint name |
+| `webtech_s3_endpoint_tcp_connect_seconds` | duration of the TCP connect |
+| `webtech_s3_endpoint_tls_handshake_seconds` | duration of the TLS handshake (`https` only) |
+| `webtech_s3_endpoint_failures_total{phase}` | checks that failed, by the phase that failed: `dns`, `tcp`, `tls` |
+| `webtech_s3_endpoint_addresses` | addresses the name resolved to |
+| `webtech_s3_endpoint_tls_cert_expiry_timestamp_seconds` | when the certificate presented expires, in Unix time |
+
+A phase that a check did not reach keeps the duration it last measured.
 
 `webtech_s3_usage_stale_seconds` is worth alerting on. Sources backed by a
 background scanner report figures that lag by minutes (StorageGRID, MinIO) or by
@@ -366,7 +381,7 @@ stddev_over_time(webtech_s3_bucket_probe_duration_seconds[1h])
   per-bucket difference. On StorageGRID, start with the bucket's consistency
   level: `strong-global` coordinates every site where `strong-site` stays local.
 
-### Telling the DNS from the network
+### Where it breaks: DNS → TCP → TLS → S3
 
 botocore prints `Could not connect to the endpoint URL` for a name that does not
 resolve and for a connection that was refused alike; the error that tells them
@@ -385,37 +400,89 @@ The reason is one of `dns`, `connect_timeout`, `connect`, `read_timeout`,
 `webtech_s3_bucket_probe_errors_total{reason}` -- retried attempts included, so
 a hiccup the retry absorbed still shows.
 
-Two more signals separate the DNS from the rest:
+The probe alone cannot see everything, though: it keeps its connection open
+between checks, and only a new connection resolves the name, connects and
+shakes hands. So each **endpoint** is also checked on its own, the way the
+blackbox exporter does, every `connectivity_interval`:
 
-- **The DNS is measured on its own.** After each check the probe resolves the
-  endpoint's name through the same resolver -- search list, `ndots` and all --
-  into `webtech_s3_bucket_dns_duration_seconds` and
-  `webtech_s3_bucket_dns_failures_total`, and logs the addresses when they
-  change. The S3 call only resolves when it opens a connection, and its duration
-  lumps the lookup in with everything else; a DNS that fails while the probe's
-  connection stays open is invisible to it.
-- **New connections are counted** in `webtech_s3_bucket_probe_connections_total`,
-  and a check that opened one or retried is logged at INFO. Only a new
-  connection resolves the name, so a peak in `probe_duration_seconds` without a
-  new connection is not the DNS.
+1. **DNS**: the endpoint's name resolved through the pod's resolver -- search
+   list, `ndots` and all, as botocore resolves it. Not bounded by
+   `probe_timeout`: how long the resolver takes to give up is what this
+   measures.
+2. **TCP**: a connection to the resolved addresses, in order, the first that
+   answers -- as urllib3 does. `probe_timeout` per address.
+3. **TLS**, for an `https` endpoint: a handshake, with the name checked and the
+   certificate verified against `AWS_CA_BUNDLE` when it is set -- the S3
+   client's own trust. `probe_timeout`.
+
+Then the connection is closed, without a request. A phase that fails stops the
+check there.
+
+Once per endpoint, not per bucket: a hundred buckets on one grid are one
+resolution, one connection and one handshake every 30 seconds. The endpoint is
+known from the configuration, so it is checked from the start, even while no
+Secret is readable yet. With `endpoint_url` botocore addresses buckets
+path-style, so the name checked is the one the requests use. Without one (AWS)
+it goes virtual-host style, to `<bucket>.s3.<region>.amazonaws.com`, and the
+check covers `s3.<region>.amazonaws.com`: the same service, not the same DNS
+record.
+
+A balancer in front of the storage logs each check as a connection closed
+without a request -- on HAProxy, `<BADREQ>` with the `CR--` flags, or nothing
+with `option dontlognull`.
+
+The two read together:
+
+| Endpoint check | Bucket probe | Where it breaks |
+| --- | --- | --- |
+| fails at `dns` | `[dns]`, or still green on its open connection | the DNS |
+| `dns` slow, in steps of 5s | slow on a new connection | DNS queries lost, waiting out the resolver's timeout |
+| fails at `tcp` at once | `[connect]` | nothing listens (refused, reset) |
+| fails at `tcp` after `probe_timeout`, or `No route to host` | `[connect_timeout]` | the address does not answer: down, filtered |
+| fails at `tls` | `[other]`, `SSLError` | the certificate: expired, another name, an unknown CA |
+| up | `[http_5xx]` | not the network: the storage behind the balancer |
+| up | `[http_4xx]` | the credentials or the bucket's policy |
+
+The certificate's end is published in
+`webtech_s3_endpoint_tls_cert_expiry_timestamp_seconds`, and logged as a warning
+once a day when it is less than 14 days away:
+
+```promql
+webtech_s3_endpoint_tls_cert_expiry_timestamp_seconds - time() < 14 * 86400
+```
 
 What each failure looked like on the local stack (`make obs/chaos/…`):
 
-| Failure | Probe line |
-| --- | --- |
-| DNS query lost (conntrack race, overloaded DNS) | slow probes in **multiples of 5s** (the resolver's timeout), failures after 20s and more |
-| DNS answers SERVFAIL | `Cannot resolve …` at once; the probe stays green while its connection lives |
-| Nothing listens (RST) | `[connect]` in a few ms, `caused by ConnectionRefusedError` |
-| Address down | `[connect_timeout]`, 5s per attempt (`probe_timeout`) |
-| Balancer up, storage down | `[http_5xx]` in a few ms |
+| Failure | Endpoint check | Bucket probe |
+| --- | --- | --- |
+| DNS answers SERVFAIL | `failed at dns` in 8ms | **stays green** on its open connection |
+| One DNS query in three lost (conntrack race, overloaded DNS) | up, `dns` at 10.01s: two queries waiting out the resolver's 5s | green on its open connection; slow in multiples of 5s when it reconnects |
+| Nothing listens (RST) | `failed at tcp` at once, `ConnectionRefusedError` | `[connect]` in 13ms |
+| Address down | `failed at tcp` after 5.0s, `TimeoutError`; later `No route to host` after 3s, once ARP gives up | `[connect_timeout]`, 5s per attempt |
+| Balancer up, storage down | up | `[http_5xx]` in 4ms |
+| Certificate for another name | `failed at tls` in 3ms, `Hostname mismatch` | `[other]`, `SSLError` |
+| Certificate expired | `failed at tls` in 2ms, `certificate has expired` | `[other]`, `SSLError` |
+| Certificate ending in 10 days | up; `WARNING … expires in 10.0 days` | green |
+
+The first line is the case the endpoint check exists for: a DNS that fails
+while every probe stays green, until the connections are dropped and nothing
+resolves any more.
+
+**New connections are counted** in `webtech_s3_bucket_probe_connections_total`,
+and a probe that opened one or retried is logged at INFO. Only a new
+connection resolves the name, so a peak in `probe_duration_seconds` without a
+new connection is not the DNS.
 
 On OpenShift, `ndots:5` makes every name with fewer than five dots go through
 the whole search list first: `s3.example.com` costs four pairs of A and AAAA
 queries, three of them answered NXDOMAIN, each a chance to lose a packet.
 Writing the endpoint as an absolute name, with a trailing dot
 (`https://s3.example.com.:443`), or lowering `ndots` in the pod's `dnsConfig`,
-removes the detour. Measure it first: `webtech_s3_bucket_dns_duration_seconds`
+removes the detour. Measure it first: `webtech_s3_endpoint_dns_duration_seconds`
 before and after.
+
+The endpoint checks go straight to the endpoint: behind an `HTTPS_PROXY` they
+would test a path the S3 requests do not take.
 
 The two endpoints answer different questions:
 
@@ -436,12 +503,19 @@ The two endpoints answer different questions:
     "secret:app-b/app-b-s3": {"name": "archive", "state": "unreachable",
                               "reason": "dns", "error": "#1 …", "age_seconds": 12.0},
     "secret:app-c/app-c-s3": {"name": null, "state": "unconfigured",
-                              "error": "reading secret app-c/app-c-s3 is forbidden …"}}}
+                              "error": "reading secret app-c/app-c-s3 is forbidden …"}},
+   "endpoints": {
+    "https://grid.example:8082": {"state": "down", "phase": "tls",
+                                  "error": "SSLCertVerificationError: …", "age_seconds": 3.1}}}
   ```
 
+  The endpoints are there to read, and never change the status: an endpoint
+  that is down already shows as unreachable buckets, and a failed handshake
+  while the probes still pass on their open connections must not take the pod
+  out of service.
 
 Set `connectivity_interval: 0` to switch the probe off entirely: no thread, no
-requests, no probe metrics, and `/readyz` is not routed.
+requests, no probe or endpoint metrics, and `/readyz` is not routed.
 
 Both listeners, `:9773` and `:9774`, serve each connection on a thread of its
 own and drop one that sends nothing for 10 seconds. A port scan or a TCP-only
@@ -626,11 +700,17 @@ Grafana sit behind Traefik, taken from base-php's `test/demo-infra`.
 
 ```text
 exporter-{small,medium,large} --DNS--> dnsfault --> CoreDNS
-                              --S3---> lb (HAProxy) --> SeaweedFS
+                              --S3---> lb (HAProxy, :8333) --> SeaweedFS
+exporter-tls                  --S3---> lb (HAProxy, :8443 TLS) --> SeaweedFS
 ```
 
+`exporter-tls` reaches the same storage over TLS, trusting a demo CA through
+`AWS_CA_BUNDLE`, so the endpoint check has a handshake to time and to break.
+`make obs/up` makes the CA and the certificates once, into `tls/out` (never
+committed); `make obs/down` drops them.
+
 ```bash
-make obs/up       # build, start, fill three buckets with random content (first run: a few minutes)
+make obs/up       # build, start, fill four buckets with random content (first run: a few minutes)
 make obs/urls     # Grafana, Prometheus, Loki, the exporters
 make obs/down     # stop and drop the volumes
 ```
@@ -646,6 +726,9 @@ Faults, cleared by `make obs/chaos/off`:
 | `obs/chaos/lb-refuse` | nothing listens on the S3 port any more |
 | `obs/chaos/lb-down` | stops the balancer: its address stops answering |
 | `obs/chaos/s3-down` | stops the storage: the balancer answers 503 |
+| `obs/chaos/tls-wrong-name` | the TLS listener presents a certificate for another name |
+| `obs/chaos/tls-expired` | the TLS listener presents an expired certificate |
+| `obs/chaos/tls-expiring` | the TLS certificate ends in 10 days: the exporter warns |
 
 Grafana comes provisioned with the **S3 buckets** dashboard
 (`test/observability/grafana/dashboards/s3.dashboard.json`): the per-bucket

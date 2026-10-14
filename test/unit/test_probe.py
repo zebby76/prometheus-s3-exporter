@@ -2,7 +2,6 @@
 
 import json
 import logging
-import socket
 import threading
 from datetime import datetime, timedelta, timezone
 
@@ -435,91 +434,6 @@ def test_a_real_boto3_client_exposes_its_pools():
     )
     probe = ConnectivityProbe(client, "my-bucket", 30)
     assert probe._pooled_sockets() == []
-
-
-# --- DNS ---------------------------------------------------------------------
-
-
-class EndpointClient(FakeClient):
-    def __init__(self, url):
-        super().__init__()
-        self.meta = type("Meta", (), {"endpoint_url": url})()
-
-
-def fake_resolver(monkeypatch, answers):
-    """getaddrinfo answering from `answers`, one item per call."""
-    calls = []
-
-    def getaddrinfo(host, port, type=0):
-        calls.append((host, port))
-        answer = answers.pop(0)
-        if isinstance(answer, Exception):
-            raise answer
-        return [(2, 1, 6, "", (address, port)) for address in answer]
-
-    monkeypatch.setattr("exporter.probe.socket.getaddrinfo", getaddrinfo)
-    return calls
-
-
-def test_the_endpoint_name_is_resolved_and_timed(monkeypatch, caplog):
-    calls = fake_resolver(monkeypatch, [["10.0.0.2", "10.0.0.1"]])
-    probe = ConnectivityProbe(EndpointClient("http://s3.example:8333"), "b", 30)
-
-    with caplog.at_level(logging.INFO):
-        result = probe.resolve_once()
-
-    assert calls == [("s3.example", 8333)]
-    assert result.addresses == ("10.0.0.1", "10.0.0.2")
-    assert result.error is None
-    assert result.duration_seconds >= 0
-    assert any(
-        "s3.example resolves to 10.0.0.1, 10.0.0.2" in r.message for r in caplog.records
-    )
-
-
-def test_the_default_port_follows_the_scheme(monkeypatch):
-    calls = fake_resolver(monkeypatch, [["10.0.0.1"]])
-    ConnectivityProbe(EndpointClient("https://s3.example"), "b", 30).resolve_once()
-
-    assert calls == [("s3.example", 443)]
-
-
-def test_a_failed_resolution_is_counted_and_logged_once(monkeypatch, caplog):
-    failure = socket.gaierror(-3, "Temporary failure in name resolution")
-    fake_resolver(monkeypatch, [failure, failure, ["10.0.0.1"]])
-    probe = ConnectivityProbe(EndpointClient("http://s3.example"), "b", 30)
-
-    with caplog.at_level(logging.DEBUG):
-        probe.resolve_once()
-        probe.resolve_once()
-        probe.resolve_once()
-
-    assert probe.dns_failures_total == 2
-    errors = [r for r in caplog.records if r.levelno == logging.ERROR]
-    assert len(errors) == 1
-    assert "Cannot resolve s3.example" in errors[0].message
-    assert any("resolves again" in r.message for r in caplog.records)
-
-
-def test_a_change_of_address_is_logged(monkeypatch, caplog):
-    fake_resolver(monkeypatch, [["10.0.0.1"], ["10.0.0.9"]])
-    probe = ConnectivityProbe(EndpointClient("http://s3.example"), "b", 30)
-    probe.resolve_once()
-
-    with caplog.at_level(logging.INFO):
-        probe.resolve_once()
-
-    assert any(
-        "now resolves to 10.0.0.9 (was 10.0.0.1)" in r.message for r in caplog.records
-    )
-
-
-def test_no_endpoint_means_nothing_to_resolve(monkeypatch):
-    calls = fake_resolver(monkeypatch, [])
-    probe = ConnectivityProbe(FakeClient(), "b", 30)
-
-    assert probe.resolve_once().checked_at is None
-    assert calls == []
 
 
 # --- /readyz ---------------------------------------------------------------

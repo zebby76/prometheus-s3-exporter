@@ -10,14 +10,12 @@ out the whole scrape and take every other metric down with it.
 from __future__ import annotations
 
 import logging
-import socket
 import threading
 import time
-import urllib.parse
 import weakref
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional
 
 from exporter.errors import REASONS, classify, describe
 
@@ -75,23 +73,6 @@ class ProbeResult:
         return max(0.0, (now - self.checked_at).total_seconds())
 
 
-@dataclass(frozen=True)
-class DnsResult:
-    """Outcome of one resolution of the endpoint's host name.
-
-    Measured apart from the S3 call: the call only resolves when it opens a
-    connection, and its duration then lumps the lookup in with the connect and
-    the request. This one asks the same resolver -- search list, ndots and all
-    -- on every cycle, so a slow or failing DNS shows on its own.
-    """
-
-    host: Optional[str] = None
-    duration_seconds: float = 0.0
-    checked_at: Optional[datetime] = None
-    addresses: Tuple[str, ...] = ()
-    error: Optional[str] = None
-
-
 class ConnectivityProbe:
     """Answers "can we still reach the bucket" with one cheap request."""
 
@@ -116,8 +97,6 @@ class ConnectivityProbe:
         self._retries_total = 0
         # Every failed attempt, retried or not, by where it failed.
         self._errors_total = {reason: 0 for reason in REASONS}
-        self._dns = DnsResult()
-        self._dns_failures_total = 0
         # Sockets seen in the client's pool at the end of the last check; one
         # that was not there is a connection opened since. None until the pool
         # has been readable once.
@@ -137,14 +116,6 @@ class ConnectivityProbe:
     def errors_total(self) -> Dict[str, int]:
         """Failed attempts since start, by reason; every reason present."""
         return dict(self._errors_total)
-
-    @property
-    def dns(self) -> DnsResult:
-        return self._dns
-
-    @property
-    def dns_failures_total(self) -> int:
-        return self._dns_failures_total
 
     @property
     def connections_total(self) -> Optional[int]:
@@ -183,20 +154,6 @@ class ConnectivityProbe:
             return sockets
         except Exception:
             return None
-
-    def _endpoint(self) -> Optional[Tuple[str, int]]:
-        """Host and port the client sends its requests to."""
-        url = getattr(getattr(self._client, "meta", None), "endpoint_url", None)
-        if not isinstance(url, str):
-            return None
-        parsed = urllib.parse.urlsplit(url)
-        if not parsed.hostname:
-            return None
-        try:
-            port = parsed.port
-        except ValueError:
-            return None
-        return parsed.hostname, port or (443 if parsed.scheme == "https" else 80)
 
     def _head_bucket(self):
         self._client.head_bucket(Bucket=self._bucket)
@@ -356,72 +313,6 @@ class ConnectivityProbe:
         self._connections_total = (self._connections_total or 0) + new
         return new
 
-    def resolve_once(self) -> DnsResult:
-        """Resolve the endpoint's host name once and publish it. Never raises.
-
-        Not bounded by probe_timeout: the resolver has its own timeout and
-        attempts (resolv.conf), and how long it takes to give up is precisely
-        what this measures. A lost query costs a multiple of that timeout.
-        """
-        endpoint = self._endpoint()
-        if endpoint is None:
-            return self._dns
-        host, port = endpoint
-
-        started = time.perf_counter()
-        addresses: Tuple[str, ...] = ()
-        error = None
-        try:
-            infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
-            addresses = tuple(sorted({info[4][0] for info in infos}))
-        except OSError as exc:
-            error = f"{type(exc).__name__}: {exc}"
-        duration = time.perf_counter() - started
-
-        result = DnsResult(
-            host=host,
-            duration_seconds=duration,
-            checked_at=datetime.now(timezone.utc),
-            addresses=addresses,
-            error=error,
-        )
-        previous = self._dns
-        self._dns = result
-
-        if error is not None:
-            self._dns_failures_total += 1
-            # Same rhythm as reachability: the transition loud, repeats quiet.
-            logging.log(
-                logging.DEBUG if previous.error is not None else logging.ERROR,
-                "Cannot resolve %s after %.3fs: %s",
-                host,
-                duration,
-                error,
-            )
-        elif previous.error is not None:
-            logging.info(
-                "%s resolves again, to %s, in %.3fs",
-                host,
-                ", ".join(addresses),
-                duration,
-            )
-        elif addresses != previous.addresses:
-            if previous.checked_at is None:
-                logging.info(
-                    "%s resolves to %s in %.3fs", host, ", ".join(addresses), duration
-                )
-            else:
-                logging.info(
-                    "%s now resolves to %s (was %s)",
-                    host,
-                    ", ".join(addresses),
-                    ", ".join(previous.addresses),
-                )
-        else:
-            logging.debug("Resolved %s in %.3fs", host, duration)
-
-        return result
-
     def run_until(self, stop: threading.Event, initial_delay: float = 0):
         """Probe on the configured period until `stop` is set.
 
@@ -432,8 +323,6 @@ class ConnectivityProbe:
             return
         while not stop.is_set():
             self.check_once()
-            # After the check, so a slow resolver never delays its verdict.
-            self.resolve_once()
             stop.wait(self.interval_seconds)
 
     def start(

@@ -93,8 +93,11 @@ assert_present webtech_s3_bucket_probe_age_seconds
 assert_present webtech_s3_bucket_probe_retries_total
 assert_present webtech_s3_bucket_probe_errors_total
 assert_present webtech_s3_bucket_probe_connections_total
-assert_present webtech_s3_bucket_dns_duration_seconds
-assert_present webtech_s3_bucket_dns_failures_total
+# The DNS is checked per endpoint now, with TCP: once for every bucket on it.
+if [[ -n $(value_of webtech_s3_bucket_dns_duration_seconds) ]]; then
+	echo "FAIL: webtech_s3_bucket_dns_duration_seconds is still exposed" >&2
+	exit 1
+fi
 
 # Every reason is published from the start, at zero, so increase() sees the
 # first error of each.
@@ -131,6 +134,34 @@ if ! grep -q 'webtech_s3_exporter_info{.*source="' <<<"${scrape}"; then
 fi
 printf 'ok: %-40s %s\n' "usage source" \
 	"$(grep -o 'source="[^"]*"' <<<"${scrape}" | head -1)"
+
+# One endpoint check per endpoint, here plain http: DNS and TCP, no TLS.
+ENDPOINT='endpoint="http://seaweedfs:8333"'
+deadline=$((SECONDS + PROBE_INTERVAL * 2 + 10))
+until [[ -n $(value_of webtech_s3_endpoint_up) ]]; do
+	if ((SECONDS >= deadline)); then
+		echo "FAIL: webtech_s3_endpoint_up never appeared" >&2
+		exit 1
+	fi
+	sleep 2
+	fetch
+done
+for metric in endpoint_up endpoint_dns_duration_seconds endpoint_tcp_connect_seconds; do
+	if ! grep -q "^webtech_s3_${metric}{${ENDPOINT}}" <<<"${scrape}"; then
+		echo "FAIL: webtech_s3_${metric}{${ENDPOINT}} is absent" >&2
+		exit 1
+	fi
+done
+assert_equals webtech_s3_endpoint_up "$(value_of webtech_s3_endpoint_up)" 1
+if [[ -n $(value_of webtech_s3_endpoint_tls_handshake_seconds) ]]; then
+	echo "FAIL: a plain http endpoint reports a TLS handshake" >&2
+	exit 1
+fi
+if ! grep -q "^webtech_s3_exporter_info{.*${ENDPOINT}" <<<"${scrape}"; then
+	echo "FAIL: webtech_s3_exporter_info does not name the bucket's endpoint" >&2
+	exit 1
+fi
+echo "ok: the endpoint is checked, DNS and TCP"
 
 # HTTP status of a URL, without failing the script on a 5xx.
 status_of() {
@@ -178,6 +209,25 @@ assert_equals "webtech_s3_bucket_reachable (down)" \
 # Figures already collected must survive an outage rather than drop to zero.
 assert_equals "webtech_s3_bucket_size_bytes (down)" \
 	"$(value_of webtech_s3_bucket_size_bytes)" "${EXPECTED_BYTES}"
+# The stopped container's name no longer resolves: the endpoint says where.
+deadline=$((SECONDS + PROBE_INTERVAL * 2 + 10))
+until [[ $(value_of webtech_s3_endpoint_up) == 0* ]]; do
+	if ((SECONDS >= deadline)); then
+		echo "FAIL: webtech_s3_endpoint_up never dropped to 0 with the storage down" >&2
+		docker compose start seaweedfs >/dev/null 2>&1
+		exit 1
+	fi
+	sleep 2
+	fetch
+done
+ready_body="$(curl -s --max-time 10 "${READY_URL}")"
+if ! grep -q '"endpoints": {"http://seaweedfs:8333": {"state": "down"' <<<"${ready_body}"; then
+	echo "FAIL: ${READY_URL} does not show the endpoint down: ${ready_body}" >&2
+	docker compose start seaweedfs >/dev/null 2>&1
+	exit 1
+fi
+printf 'ok: %-40s %s\n' "endpoint (down)" \
+	"$(grep -o '"phase": "[a-z]*"' <<<"${ready_body}")"
 # Liveness must stay green: restarting the pod would not fix S3.
 assert_equals "${HEALTH_URL} (bucket down)" "$(status_of "${HEALTH_URL}")" 200
 

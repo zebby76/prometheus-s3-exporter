@@ -20,7 +20,8 @@ from botocore.config import Config
 DEFAULT_BUCKETS = (
     "bucket-small:200:1024:524288,"
     "bucket-medium:5000:1024:65536,"
-    "bucket-large:50000:1024:8192"
+    "bucket-large:50000:1024:8192,"
+    "bucket-tls:100:1024:65536"
 )
 WORKERS = int(os.getenv("SEED_WORKERS", "32"))
 

@@ -1085,7 +1085,7 @@
             "uid": "${ds}"
           },
           "editorMode": "code",
-          "expr": "max by (name) (webtech_s3_bucket_dns_duration_seconds{name=~\"$bucket\"})",
+          "expr": "max by (name) (\n  webtech_s3_exporter_info{name=~\"$bucket\"}\n    * on (instance, job, endpoint) group_left\n      webtech_s3_endpoint_dns_duration_seconds\n)",
           "refId": "P",
           "format": "table",
           "instant": true,
@@ -1726,8 +1726,8 @@
       "pluginVersion": "10.2.3",
       "type": "timeseries",
       "id": 7,
-      "title": "DNS resolution time",
-      "description": "The endpoint name resolved on its own after every probe, through the pod's resolver (search list and ndots included). Steps at multiples of 5s are lost DNS queries waiting out the resolver's timeout; bars are failed resolutions.",
+      "title": "Endpoint: DNS, TCP, TLS",
+      "description": "Each endpoint checked on its own every probe interval: its name resolved through the pod's resolver (search list and ndots included), a TCP connection, a TLS handshake for https. Steps at multiples of 5s in dns are lost DNS queries waiting out the resolver's timeout; bars are failed checks, by the phase that failed.",
       "gridPos": {
         "h": 8,
         "w": 12,
@@ -1741,10 +1741,10 @@
             "uid": "${ds}"
           },
           "editorMode": "code",
-          "expr": "webtech_s3_bucket_dns_duration_seconds{name=~\"$bucket\"}",
+          "expr": "max by (endpoint) (webtech_s3_endpoint_dns_duration_seconds)",
           "refId": "A",
           "range": true,
-          "legendFormat": "{{name}}"
+          "legendFormat": "{{endpoint}} - dns"
         },
         {
           "datasource": {
@@ -1752,10 +1752,32 @@
             "uid": "${ds}"
           },
           "editorMode": "code",
-          "expr": "increase(webtech_s3_bucket_dns_failures_total{name=~\"$bucket\"}[$__rate_interval]) > 0",
+          "expr": "max by (endpoint) (webtech_s3_endpoint_tcp_connect_seconds)",
+          "refId": "C",
+          "range": true,
+          "legendFormat": "{{endpoint}} - tcp"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds}"
+          },
+          "editorMode": "code",
+          "expr": "max by (endpoint) (webtech_s3_endpoint_tls_handshake_seconds)",
+          "refId": "D",
+          "range": true,
+          "legendFormat": "{{endpoint}} - tls"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds}"
+          },
+          "editorMode": "code",
+          "expr": "max by (endpoint, phase) (increase(webtech_s3_endpoint_failures_total[$__rate_interval])) > 0",
           "refId": "B",
           "range": true,
-          "legendFormat": "{{name}} - failures"
+          "legendFormat": "{{endpoint}} - {{phase}} failures"
         }
       ]
     },
@@ -1983,7 +2005,7 @@
         "type": "loki",
         "uid": "${logs_ds}"
       },
-      "description": "The probe's own account of each event: an outage with every attempt and its root cause, a recovery, a DNS failure or change of address, a check that opened a connection or retried. Set the log selector variable to where the exporters' logs live.",
+      "description": "The probe's own account of each event: an outage with every attempt and its root cause, a recovery, an endpoint failing at dns, tcp or tls, a change of address, a certificate close to its end, a check that opened a connection or retried. Set the log selector variable to where the exporters' logs live.",
       "gridPos": {
         "h": 10,
         "w": 24,
@@ -2006,7 +2028,7 @@
             "uid": "${logs_ds}"
           },
           "editorMode": "code",
-          "expr": "${log_selector} |~ \"became unreachable|is reachable again|Cannot resolve|resolves|new connection|failed in\"",
+          "expr": "${log_selector} |~ \"became unreachable|is reachable again|Endpoint .* failed at|resolves to|certificate of|new connection|failed in\"",
           "refId": "A",
           "range": true
         }

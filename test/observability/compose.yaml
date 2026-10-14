@@ -5,7 +5,7 @@
 # Grafana behind Traefik. Driven from the root Makefile (`make obs/help`).
 #
 #   exporter-* --DNS--> dnsfault --> coredns --> Docker DNS
-#              --S3---> lb (haproxy) --> seaweedfs
+#              --S3---> lb (haproxy, :8333 http, :8443 https) --> seaweedfs
 #
 # Traefik, Prometheus, Grafana and Loki come from base-php test/demo-infra.
 
@@ -217,8 +217,11 @@ services:
     environment:
       - LB_IDLE_TIMEOUT=${LB_IDLE_TIMEOUT:-60s}
       - LB_BIND_PORT=${LB_BIND_PORT:-8333}
+      - LB_TLS_CERT=${LB_TLS_CERT:-server.pem}
     volumes:
       - ./haproxy/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+      # Made by `make obs/up` (tls/make-certs.sh), never committed.
+      - ./tls/out:/tls:ro
     networks:
       default:
         # Served by CoreDNS as s3.storage.internal.
@@ -309,6 +312,24 @@ services:
       <<: *exporter-labels
       traefik.http.routers.exporter-large.rule: Host(`large.exporter.localhost`)
       traefik.http.services.exporter-large.loadbalancer.server.port: "9773"
+
+  # The same path over TLS, trusting the demo CA as AWS_CA_BUNDLE: the
+  # endpoint check adds a handshake phase, and make obs/chaos/tls-* break it.
+  exporter-tls:
+    <<: *exporter
+    environment:
+      <<: *exporter-env
+      S3_BUCKET_NAME: bucket-tls
+      AWS_ENDPOINT_URL: https://s3.storage.internal:8443
+      AWS_CA_BUNDLE: /tls/ca.pem
+    volumes:
+      - ./exporter/collector.yml:/app/config/collector.yml:ro
+      - ./exporter/resolv.conf:/etc/resolv.conf:ro
+      - ./tls/out/ca.pem:/tls/ca.pem:ro
+    labels:
+      <<: *exporter-labels
+      traefik.http.routers.exporter-tls.rule: Host(`tls.exporter.localhost`)
+      traefik.http.services.exporter-tls.loadbalancer.server.port: "9773"
 
 volumes:
   prometheus-data:

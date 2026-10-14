@@ -37,7 +37,11 @@ Draft, completed as 6.0.0 takes shape.
   collection taking a large share of the interval is gone.
   `webtech_s3_collect_interval_seconds` reports the interval in force.
 - `webtech_s3_exporter_info` has one series per watched bucket, labelled `bucket_namespace` and
-  `name`.
+  `name`, and an `endpoint` label.
+- **`webtech_s3_bucket_dns_duration_seconds{name}` and `webtech_s3_bucket_dns_failures_total{name}`
+  are gone** (added in 5.1.0): the DNS is checked per endpoint, in
+  `webtech_s3_endpoint_dns_duration_seconds{endpoint}` and
+  `webtech_s3_endpoint_failures_total{endpoint, phase="dns"}`. Re-import the shipped dashboard.
 
 ### Added
 
@@ -59,9 +63,24 @@ Draft, completed as 6.0.0 takes shape.
 - `webtech_s3_bucket_configured`, `webtech_s3_buckets{state}`, `webtech_s3_collections_running`,
   `webtech_s3_collections_overdue`.
 
+- Endpoint checks: every endpoint the buckets live on is checked once, whatever the number of
+  buckets on it, every `connectivity_interval` -- its name resolved, a TCP connection, a TLS
+  handshake for `https` verified against `AWS_CA_BUNDLE` -- and each phase timed, as the blackbox
+  exporter does. The bucket probes keep their connection open, so a DNS that fails or a
+  certificate that expired stayed invisible to them until they reconnected. Metrics labelled
+  `{endpoint}`: `webtech_s3_endpoint_up`, `_check_age_seconds`, `_dns_duration_seconds`,
+  `_tcp_connect_seconds`, `_tls_handshake_seconds`, `_failures_total{phase}`, `_addresses`,
+  `_tls_cert_expiry_timestamp_seconds`. A failure is logged with its phase; a certificate less
+  than 14 days from its end is warned about once a day. `/readyz` shows the endpoints, without
+  counting them.
+- `test/observability`: an exporter over TLS, with a demo CA made by `make obs/up`, and
+  `make obs/chaos/tls-wrong-name`, `tls-expired` and `tls-expiring`.
+
 ### Changed
 
 - `/readyz` answers 503 only when every bucket is unreachable or unconfigured.
+- The connectivity probe no longer resolves the endpoint's name itself: the endpoint check does,
+  once for all the buckets on it.
 
 ## [5.1.0]
 

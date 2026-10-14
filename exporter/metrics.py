@@ -317,24 +317,6 @@ class BucketSizeCollector(object):
                         "since start.",
                     ]
                 )
-            dns = self.probe.dns
-            metrics.append(
-                [
-                    collector_metric_name + ["bucket_dns_duration_seconds"],
-                    prometheus_labels,
-                    dns.duration_seconds,
-                    "Duration of the last resolution of the endpoint name, "
-                    "in seconds.",
-                ]
-            )
-            metrics.append(
-                [
-                    collector_metric_name + ["bucket_dns_failures_total"],
-                    prometheus_labels,
-                    float(self.probe.dns_failures_total),
-                    "Resolutions of the endpoint name that failed since start.",
-                ]
-            )
 
         return metrics
 

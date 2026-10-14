@@ -15,7 +15,7 @@ from exporter import (
     positive_number,
 )
 from exporter.errors import REASONS
-from exporter.probe import DnsResult, ProbeResult
+from exporter.probe import ProbeResult
 from exporter.sources.base import SourceUnavailable, Usage
 
 
@@ -183,15 +183,11 @@ class StubProbe:
         retries_total=0,
         errors_total=None,
         connections_total=None,
-        dns=None,
-        dns_failures_total=0,
     ):
         self.result = result
         self.retries_total = retries_total
         self.errors_total = errors_total or {reason: 0 for reason in REASONS}
         self.connections_total = connections_total
-        self.dns = dns or DnsResult()
-        self.dns_failures_total = dns_failures_total
 
 
 def test_probe_metrics_are_published_when_a_probe_is_wired():
@@ -220,8 +216,6 @@ def test_the_probe_diagnostics_are_published():
         ProbeResult(reachable=True, checked_at=NOW),
         errors_total={**{reason: 0 for reason in REASONS}, "dns": 3},
         connections_total=12,
-        dns=DnsResult(host="s3.example", duration_seconds=5.004, checked_at=NOW),
-        dns_failures_total=2,
     )
     collector = BucketSizeCollector("ns", "my-bucket", 60, probe=probe)
 
@@ -236,8 +230,8 @@ def test_the_probe_diagnostics_are_published():
     assert errors["dns"] == 3
     assert errors["connect"] == 0
     assert metrics["webtech_s3_bucket_probe_connections_total"].samples[0].value == 12
-    assert metrics["webtech_s3_bucket_dns_duration_seconds"].samples[0].value == 5.004
-    assert metrics["webtech_s3_bucket_dns_failures_total"].samples[0].value == 2
+    # The DNS is the endpoint's business now, checked once for every bucket.
+    assert not any("dns" in name for name in metrics)
 
 
 def test_connections_are_omitted_when_the_client_cannot_count_them():
@@ -247,7 +241,7 @@ def test_connections_are_omitted_when_the_client_cannot_count_them():
     names = {metric.name for metric in collector.collect()}
 
     assert "webtech_s3_bucket_probe_connections_total" not in names
-    assert "webtech_s3_bucket_dns_duration_seconds" in names
+    assert "webtech_s3_bucket_probe_errors_total" in names
 
 
 def test_an_unreachable_bucket_is_reported_as_zero():

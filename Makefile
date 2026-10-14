@@ -115,6 +115,7 @@ _assert-metrics:
 OBS_DIR                     := test/observability
 OBS                         := docker compose --project-directory $(OBS_DIR) -f $(OBS_DIR)/compose.yaml
 OBS_FAULT                   := $(OBS_DIR)/dnsfault/state/fault.conf
+OBS_TLS                     := $(OBS_DIR)/tls/out
 # Prometheus discovers its targets through the Docker socket, whose group differs from one host to the next.
 export DOCKER_GID           ?= $(shell stat -c %g /var/run/docker.sock 2>/dev/null || echo 0)
 # Only the storage endpoint's queries are disturbed, search-list expansions included.
@@ -131,12 +132,15 @@ IDLE                        ?= 25s
 
 obs/up: ## obs/up : build the dev image, start the stack, fill the buckets, wait until everything is up
 	@[ -f $(OBS_FAULT) ] || printf 'mode=off\n' > $(OBS_FAULT)
+	@[ -f $(OBS_TLS)/server.pem ] || docker run --rm -u "$$(id -u):$$(id -g)" -v "$(CURDIR)/$(OBS_DIR)/tls:/tls" \
+		--entrypoint sh docker.io/library/haproxy:3.2 /tls/make-certs.sh
 	@$(OBS) up -d --build --wait --wait-timeout 600
 	@$(MAKE) --no-print-directory obs/urls
 
 obs/down: ## obs/down : stop the stack and drop its volumes (buckets, metrics, logs)
 	@$(OBS) down -v --remove-orphans
 	@rm -f $(OBS_FAULT)
+	@rm -rf $(OBS_TLS)
 
 obs/seed: ## obs/seed [ SEED_BUCKETS=name:count:min:max,... ] : create or complete the demo buckets
 	@$(OBS) run --rm $${SEED_BUCKETS:+-e BUCKETS=$$SEED_BUCKETS} seed
@@ -154,12 +158,13 @@ obs/urls: ## obs/urls : print the stack's entry points
 	 echo "Prometheus  http://prometheus.localhost$$s"; \
 	 echo "Loki        http://loki.localhost$$s"; \
 	 echo "Alloy       http://alloy.localhost$$s"; \
-	 echo "Exporters   http://{small,medium,large}.exporter.localhost$$s/metrics"; \
+	 echo "Exporters   http://{small,medium,large,tls}.exporter.localhost$$s/metrics"; \
 	 echo "Traefik     http://localhost:$${OBS_TRAEFIK_PORT:-8888}"; \
 	 echo "DNS fault   $$(tr '\n' ' ' < $(OBS_FAULT) 2>/dev/null || echo 'mode=off')"
 
 .PHONY: obs/chaos/dns-drop obs/chaos/dns-delay obs/chaos/dns-servfail obs/chaos/s3-down obs/chaos/lb-down \
-	obs/chaos/lb-refuse obs/chaos/lb-idle obs/chaos/off
+	obs/chaos/lb-refuse obs/chaos/lb-idle obs/chaos/tls-wrong-name obs/chaos/tls-expired obs/chaos/tls-expiring \
+	obs/chaos/off
 
 obs/chaos/dns-drop: ## obs/chaos/dns-drop [ RATIO=0.33 MATCH=... ] : lose that share of DNS queries (resolver timeout)
 	@printf 'mode=drop\nratio=$(RATIO)\nmatch=$(MATCH)\n' > $(OBS_FAULT)
@@ -186,6 +191,18 @@ obs/chaos/lb-refuse: ## obs/chaos/lb-refuse : keep the LB up with no listener on
 obs/chaos/lb-idle: ## obs/chaos/lb-idle [ IDLE=25s ] : set the LB idle timeout; under 30s every probe reconnects and resolves
 	@LB_IDLE_TIMEOUT=$(IDLE) $(OBS) up -d --force-recreate lb
 	@echo "LB: idle timeout $(IDLE)"
+
+obs/chaos/tls-wrong-name: ## obs/chaos/tls-wrong-name : the LB's TLS listener presents a certificate for another name
+	@LB_TLS_CERT=wrong-name.pem $(OBS) up -d --force-recreate lb
+	@echo "LB: TLS certificate for other.storage.internal"
+
+obs/chaos/tls-expired: ## obs/chaos/tls-expired : the LB's TLS listener presents an expired certificate
+	@LB_TLS_CERT=expired.pem $(OBS) up -d --force-recreate lb
+	@echo "LB: expired TLS certificate"
+
+obs/chaos/tls-expiring: ## obs/chaos/tls-expiring : the LB's TLS certificate ends in 10 days (the exporter warns at 14)
+	@LB_TLS_CERT=expiring.pem $(OBS) up -d --force-recreate lb
+	@echo "LB: TLS certificate ending in 10 days"
 
 obs/chaos/off: ## obs/chaos/off : clear the DNS fault, restart the storage and the LB with its default idle timeout
 	@printf 'mode=off\n' > $(OBS_FAULT)

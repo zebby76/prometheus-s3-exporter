@@ -509,6 +509,7 @@ class ExporterCollector:
         version: str,
         endpoints=None,
         config=None,
+        discovery=None,
     ):
         # A list, or the Fleet a reload changes: iterated afresh every scrape.
         self.monitors = monitors
@@ -518,6 +519,8 @@ class ExporterCollector:
         self.endpoints = endpoints
         # The ConfigReloader, for its own metrics; None in tests.
         self.config = config
+        # The Discoverer, for the selectors' metrics; None in tests.
+        self.discovery = discovery
 
     def collect(self):
         rows = []
@@ -551,6 +554,12 @@ class ExporterCollector:
 
         if self.config is not None:
             rows += self.config.rows()
+        if self.discovery is not None:
+            try:
+                rows += self.discovery.rows()
+            except Exception as exc:
+                succeeded = False
+                logging.error("Metrics of the discovery: %s", exc)
         if self.endpoints is not None:
             try:
                 rows += self.endpoints.rows()

@@ -222,11 +222,17 @@ obs/chaos/off: ## obs/chaos/off : clear the DNS fault, restart the storage and t
 	@echo "All faults cleared"
 
 .PHONY: obs/kube/reset obs/kube/forbid obs/kube/allow obs/kube/delete obs/kube/wrong-key obs/kube/repoint \
-	obs/kube/config-add obs/kube/config-remove obs/kube/config-broken
+	obs/kube/config-add obs/kube/config-remove obs/kube/config-broken \
+	obs/kube/label obs/kube/unlabel obs/kube/annotate obs/kube/forbid-list obs/kube/allow-list
 
 # The multi-bucket exporter's fake cluster. NAME is namespace/secret, e.g. NAME=app-a/app-a-uploads-s3.
 NAME                        ?= app-a/app-a-uploads-s3
 BUCKET                      ?= bucket-small
+# The discovery targets work on app-b, whose Secrets are found by label.
+NS                          ?= app-b
+KEY                         ?= interval
+VALUE                       ?=
+_DISCOVERED_NAME             = $(if $(filter command line,$(origin NAME)),$(NAME),app-b/app-b-spare-s3)
 
 obs/kube/reset: ## obs/kube/reset : put back every Secret, Role and the multi-bucket exporter's ConfigMap
 	@$(OBS_KUBE) reset
@@ -254,6 +260,21 @@ obs/kube/config-remove: ## obs/kube/config-remove : remove a bucket from it
 
 obs/kube/config-broken: ## obs/kube/config-broken : publish a collector.yml that is not valid YAML
 	@$(OBS_KUBE) config-broken
+
+obs/kube/label: ## obs/kube/label [ NAME=ns/secret ] : label a Secret so the selector finds it (default app-b/app-b-spare-s3)
+	@$(OBS_KUBE) label $(_DISCOVERED_NAME)
+
+obs/kube/unlabel: ## obs/kube/unlabel [ NAME=ns/secret ] : remove that label: the bucket is no longer watched
+	@$(OBS_KUBE) unlabel $(_DISCOVERED_NAME)
+
+obs/kube/annotate: ## obs/kube/annotate [ NAME=ns/secret KEY=interval VALUE=... ] : set an annotation (empty VALUE removes it)
+	@$(OBS_KUBE) annotate $(_DISCOVERED_NAME) $(KEY) "$(VALUE)"
+
+obs/kube/forbid-list: ## obs/kube/forbid-list [ NS=app-b ] : drop the Role's `list` on Secrets (403 on discovery)
+	@$(OBS_KUBE) forbid-list $(NS)
+
+obs/kube/allow-list: ## obs/kube/allow-list [ NS=app-b ] : grant `list` again
+	@$(OBS_KUBE) allow-list $(NS)
 
 # —— Docker build —————————————————————————————————————————————————————————————————————————————————————————————————————
 

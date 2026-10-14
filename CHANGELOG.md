@@ -22,6 +22,34 @@ notes.
 
 Nothing pending.
 
+## [6.1.0]
+
+Buckets found by label: a selector instead of one entry per Secret. Nothing changes for an existing
+configuration.
+
+### Added
+
+- **Buckets found by label.** A `buckets` entry can name a label selector and one or more
+  namespaces instead of a Secret: `{ selector: "s3-exporter/watch=true", namespace: [app-a,
+  app-b] }`. Every Secret that carries the label is a bucket; one that gains the label is watched,
+  one that loses it stops being watched, a rotated key is read at once. Named entries keep working
+  alongside, and win when a Secret is both named and found.
+  - Listed every `discovery_interval` seconds (60, reloadable; 0 lists only at startup, on a
+    reload and on `SIGHUP`). A list that fails keeps every bucket it found before.
+  - The values come from the list itself: the namespace's Role needs `list` only, and that `list`
+    lets the exporter read **every** Secret of the namespace -- RBAC cannot filter on labels. See
+    `deploy/openshift/rbac-app-namespace-discovery.yaml` and `README.md`.
+  - Annotations on a Secret, under `annotation_prefix` (`s3-exporter` by default, reloadable),
+    override the entry for that bucket: `interval`, `collect`, `endpoint-url`, `region`, `source`,
+    `bucket-name`, and the Secret's own key names: `access-key-field`, `secret-key-field`,
+    `bucket-field`. One that cannot be honoured leaves only that bucket unwatched, with the reason.
+  - Metrics `webtech_s3_discovery_{up,secrets,last_success_timestamp_seconds}` and
+    `webtech_s3_discovery_failures_total{reason}`, by `{bucket_namespace, selector}`; a
+    `discovery` block in `/readyz`, for information; selectors in `--check-config`.
+  - Dashboard: a *Discovery failing* stat and a *Discovery* section.
+  - Local stack: `app-b`'s Secrets are discovered; the fake API answers `list` with label
+    selectors; `make obs/kube/{label,unlabel,annotate,forbid-list,allow-list}`.
+
 ## [6.0.0]
 
 One exporter for a list of buckets: credentials from Kubernetes Secrets, a probe per bucket,

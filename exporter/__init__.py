@@ -12,10 +12,11 @@ from prometheus_client.core import REGISTRY
 from exporter import sources
 from exporter._version import get_versions
 from exporter.buckets import (
+    BucketPlan,
     BucketSpec,
     ConfigError,
     multi_bucket,
-    parse_buckets,
+    parse_plan,
     single_bucket_spec,
 )
 from exporter.clients import (  # noqa: F401 -- re-exported
@@ -31,6 +32,7 @@ from exporter.config import (
     restart_keys,
 )
 from exporter.credentials import CredentialsUnavailable
+from exporter.discovery import DEFAULT_DISCOVERY_SECONDS, Discoverer
 from exporter.endpoints import EndpointRegistry
 from exporter.fleet import Fleet
 from exporter.handler import (
@@ -164,6 +166,7 @@ def parse_configuration(content: bytes) -> dict:
         "max_concurrent_collections": DEFAULT_MAX_CONCURRENT_COLLECTIONS,
         "credentials_refresh": DEFAULT_CREDENTIALS_REFRESH_SECONDS,
         "config_reload_interval": DEFAULT_CONFIG_RELOAD_SECONDS,
+        "discovery_interval": DEFAULT_DISCOVERY_SECONDS,
     }
     configured = set()
 
@@ -222,18 +225,22 @@ def parse_configuration(content: bytes) -> dict:
     return settings
 
 
-# What a reload applies; every other setting needs a restart. Both decide the
-# bucket entries: the list, and the key names every entry inherits.
-RELOADABLE_SETTINGS = frozenset({"buckets", "secret_keys"})
+# What a reload applies; every other setting needs a restart. All decide the
+# bucket entries -- the list, the key names every entry inherits, the prefix of
+# a discovered Secret's annotations -- or how often selectors are listed.
+RELOADABLE_SETTINGS = frozenset(
+    {"buckets", "secret_keys", "annotation_prefix", "discovery_interval"}
+)
 
 
-def configuration_applier(running: dict, fleet, specs_of=None):
+def configuration_applier(running: dict, discoverer, plan_of=None):
     """What the reloader calls with a new collector.yml content.
 
     Raises ConfigError to reject it; returns the settings that changed but
-    only a restart applies. The bucket list is applied as a difference.
+    only a restart applies. The bucket entries go to the Discoverer, which
+    applies them, with the Secrets its selectors find, as a difference.
     """
-    specs_of = specs_of or bucket_specs
+    plan_of = plan_of or bucket_plan
     multi = multi_bucket(running)
 
     def apply(content: bytes) -> List[str]:
@@ -244,11 +251,24 @@ def configuration_applier(running: dict, fleet, specs_of=None):
             return sorted(set(pending) | {"buckets"})
         if multi:
             # Validated in full first: one bad entry rejects the whole file.
-            change = fleet.apply(specs_of(read))
+            plan = plan_of(read)
+            interval = discovery_interval(read)
+            change = discoverer.set_plan(plan)
+            discoverer.interval_seconds = interval
             logging.info("Configuration reloaded: %s", change.summary())
         return pending
 
     return apply
+
+
+def discovery_interval(settings) -> float:
+    """Seconds between two lists of the selectors' Secrets; 0 turns it off."""
+    value = settings.get("discovery_interval")
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
+        raise ConfigError(
+            f"discovery_interval must be a number of seconds, 0 or above, got {value!r}"
+        )
+    return float(value)
 
 
 def positive_number(settings, key, unit):
@@ -285,28 +305,43 @@ def require_env(name):
     return value
 
 
-def bucket_specs(settings, environ=None, kube=None) -> List[BucketSpec]:
-    """The buckets to watch: the configured list, or the one the environment names.
+def bucket_plan(settings, environ=None, kube=None) -> BucketPlan:
+    """The bucket entries: the configured list, or the one the environment names.
 
     Raises ConfigError when the list cannot be honoured.
     """
     environ = os.environ if environ is None else environ
     if not multi_bucket(settings):
-        return [single_bucket_spec(environ)]
+        return BucketPlan([single_bucket_spec(environ)], [])
     if kube is None:
         kube = InClusterKubernetes.detect(environ)
-    return parse_buckets(settings, environ, kube)
+    return parse_plan(settings, environ, kube)
 
 
-def check_config(specs: List[BucketSpec], out=None) -> int:
+def bucket_specs(settings, environ=None, kube=None) -> List[BucketSpec]:
+    """The buckets the configuration names, selectors aside."""
+    return bucket_plan(settings, environ, kube).specs
+
+
+def check_config(specs: List[BucketSpec], out=None, listings=()) -> int:
     """Resolve every bucket's credentials once and report; 0 when all resolve.
 
     What an operator runs (`oc exec … exporter --check-config`) to find the
-    Secret, key or RoleBinding that is missing before going live. Reports
-    names only: no value read from a Secret is ever printed.
+    Secret, key, selector or RoleBinding that is missing before going live.
+    `listings` are the selectors, listed already. Reports names only: no value
+    read from a Secret is ever printed.
     """
     out = out or sys.stdout
     failures = 0
+    for listing in listings:
+        if listing.up:
+            print(
+                f"OK    {listing.describe()}: {len(listing.secrets)} secret(s)",
+                file=out,
+            )
+        else:
+            failures += 1
+            print(f"FAIL  {listing.describe()}: {listing.error}", file=out)
     for spec in specs:
         try:
             credentials = spec.credentials.resolve()
@@ -321,7 +356,12 @@ def check_config(specs: List[BucketSpec], out=None) -> int:
             file=out,
         )
     print(
-        f"{len(specs) - failures} of {len(specs)} bucket(s) resolved",
+        (
+            f"{len(specs) - min(failures, len(specs))} of {len(specs)} bucket(s) resolved"
+            if not listings
+            else f"{len(listings)} selector(s), {len(specs)} bucket(s), "
+            f"{failures} failure(s)"
+        ),
         file=out,
     )
     return 1 if failures else 0
@@ -370,12 +410,21 @@ def main():
     multi = multi_bucket(settings)
 
     try:
-        specs = bucket_specs(settings)
+        plan = bucket_plan(settings)
+        discoverer = Discoverer(
+            InClusterKubernetes.detect() if multi else None,
+            plan,
+            discovery_interval(settings) if multi else 0,
+            STOP,
+        )
     except ConfigError as e:
         logging.error("Invalid configuration: %s", e)
         sys.exit(1)
+    # The selectors are listed once before anything starts: the Secrets they
+    # find start with the named ones.
+    specs = discoverer.discover()
     if args.check_config:
-        sys.exit(check_config(specs))
+        sys.exit(check_config(specs, listings=discoverer.listings()))
 
     if not multi:
         # The single-bucket mode's own checks, with the messages it always had.
@@ -405,7 +454,9 @@ def main():
     )
     refresh_seconds = positive_number(settings, "credentials_refresh", "seconds")
 
-    refresher = CredentialsRefresher([], refresh_seconds, STOP)
+    refresher = CredentialsRefresher(
+        [], refresh_seconds, STOP, before_refresh=discoverer.relist_for
+    )
 
     def make_monitor(spec):
         monitor = BucketMonitor(spec, monitor_settings)
@@ -441,6 +492,7 @@ def main():
     if endpoints is not None:
         endpoints.sync(fleet.endpoints())
     refresher.monitors = fleet
+    discoverer.fleet = fleet
 
     scheduler = CollectionScheduler(fleet, max_workers, STOP)
     refresher.on_change = scheduler.wake
@@ -448,10 +500,15 @@ def main():
 
     reload_seconds = int(settings["config_reload_interval"])
     reloader = ConfigReloader(
-        CONFIG_PATH, reload_seconds, configuration_applier(settings, fleet), STOP
+        CONFIG_PATH, reload_seconds, configuration_applier(settings, discoverer), STOP
     )
     reloader.started_with_file()
-    signal.signal(signal.SIGHUP, lambda _signum, _frame: reloader.request())
+
+    def on_sighup(_signum, _frame):
+        reloader.request()
+        discoverer.request()
+
+    signal.signal(signal.SIGHUP, on_sighup)
     if reload_seconds and looks_mounted_with_subpath(CONFIG_PATH):
         logging.warning(
             "%s is mounted on its own -- a Kubernetes subPath, or a single-file "
@@ -461,7 +518,9 @@ def main():
         )
 
     REGISTRY.register(
-        ExporterCollector(fleet, scheduler, __version__, endpoints, reloader)
+        ExporterCollector(
+            fleet, scheduler, __version__, endpoints, reloader, discoverer
+        )
     )
 
     set_proxy_headers(settings["proxy_headers"])
@@ -474,11 +533,15 @@ def main():
             else None
         ),
         endpoints=endpoints.readiness if endpoints is not None else None,
+        discovery=discoverer.readiness if multi else None,
     )
 
     refresher.start()
     scheduler.start()
     reloader.start()
+    if multi:
+        # Even without a selector yet: a reload may bring one.
+        discoverer.start()
 
     # Woken by SIGTERM/SIGINT; the timeout keeps the main thread responsive to
     # signals on every platform.

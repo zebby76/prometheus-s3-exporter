@@ -20,11 +20,14 @@ notes.
 
 ## [Unreleased]
 
-Work toward 6.0.0: one exporter for a list of buckets.
+One exporter for a list of buckets: credentials from Kubernetes Secrets, a probe per bucket,
+sizes in the background, every endpoint checked from DNS to TLS, the list reloaded without a
+restart.
 
 ### Upgrading from 5.x
 
-Draft, completed as 6.0.0 takes shape.
+A single-bucket deployment keeps working without a change to its configuration. What changes
+around it:
 
 - **`namespace` is now `bucket_namespace`** on every bucket metric, single-bucket
   deployments included. Prometheus sets `namespace` on every target itself, so the exporter's
@@ -44,7 +47,13 @@ Draft, completed as 6.0.0 takes shape.
 - **`webtech_s3_bucket_dns_duration_seconds{name}` and `webtech_s3_bucket_dns_failures_total{name}`
   are gone** (added in 5.1.0): the DNS is checked per endpoint, in
   `webtech_s3_endpoint_dns_duration_seconds{endpoint}` and
-  `webtech_s3_endpoint_failures_total{endpoint, phase="dns"}`. Re-import the shipped dashboard.
+  `webtech_s3_endpoint_failures_total{endpoint, phase="dns"}`.
+- **Re-import the dashboard**: it is rebuilt for many buckets, keyed by `bucket_namespace` and
+  `name`, and keeps its uid, so the import replaces the 5.x one.
+
+To move from one deployment per bucket to one exporter, see "Migrating from one deployment per
+bucket" in README.md: Roles and RoleBindings per application namespace, the list in a
+ConfigMap, the new exporter next to the old ones until the dashboard shows the same figures.
 
 ### Added
 
@@ -65,7 +74,6 @@ Draft, completed as 6.0.0 takes shape.
   `webtech_s3_bucket_configured 0`, the reason in the log and in `/readyz`.
 - `webtech_s3_bucket_configured`, `webtech_s3_buckets{state}`, `webtech_s3_collections_running`,
   `webtech_s3_collections_overdue`.
-
 - Endpoint checks: every endpoint the buckets live on is checked once, whatever the number of
   buckets on it, every `connectivity_interval` -- its name resolved, a TCP connection, a TLS
   handshake for `https` verified against `AWS_CA_BUNDLE` -- and each phase timed, as the blackbox
@@ -84,6 +92,16 @@ Draft, completed as 6.0.0 takes shape.
   configuration in force kept, and `webtech_s3_config_last_reload_successful` drops to 0. A
   configuration file mounted on its own (Kubernetes `subPath`) is warned about at startup:
   Kubernetes never updates it.
+- `deploy/openshift/`: example manifests -- ServiceAccount, a Role and RoleBinding per application
+  namespace, the ConfigMap, the Deployment, a Service with a ServiceMonitor or a PodMonitor.
+- The dashboard, rebuilt for many buckets in one exporter as much as one bucket per exporter: a
+  header of what needs attention, the buckets keyed by `(bucket_namespace, name)` with the
+  unreachable first, the buckets not watched, only the problems among a hundred, the endpoints,
+  the exporters per pod, and their logs. New `namespace` and `endpoint` variables.
+- `test/observability`: a multi-bucket exporter reading Secrets from a fake Kubernetes API (token,
+  a Role per Secret, 403 and 404 as the API server answers them) in three application
+  namespaces, its configuration a reloadable ConfigMap volume, and `make obs/kube/*` to forbid,
+  delete, break or repoint a Secret and to change the list.
 - `test/observability`: an exporter over TLS, with a demo CA made by `make obs/up`, and
   `make obs/chaos/tls-wrong-name`, `tls-expired` and `tls-expiring`.
 

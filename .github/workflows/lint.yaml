@@ -41,6 +41,9 @@ jobs:
           VALIDATE_PHP_PSALM: false
           VALIDATE_TERRAGRUNT: false
           VALIDATE_DOCKERFILE_HADOLINT: false
+          # The ServiceMonitor and PodMonitor in deploy/openshift are CRDs:
+          # their schemas come from the community catalog.
+          KUBERNETES_KUBECONFORM_OPTIONS: "-schema-location default -schema-location https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json"
           # Prettier and StandardJS are incompatible
           VALIDATE_JAVASCRIPT_PRETTIER: false
           VALIDATE_TYPESCRIPT_PRETTIER: false

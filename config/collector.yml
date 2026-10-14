@@ -94,7 +94,7 @@ configuration:
       #   # the API answers 404 rather than a wrong figure.
       #   jurisdiction: eu
 
-  # One exporter for a list of buckets (6.0.0, in progress). Without `buckets`,
+  # One exporter for a list of buckets (6.0.0). Without `buckets`,
   # the exporter watches the one bucket S3_BUCKET_NAME names. With it, `interval`
   # defaults to 60 minutes: probes come first, sizes are background work.
   # See "Multi-bucket configuration" in README.md.

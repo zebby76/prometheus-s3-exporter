@@ -30,3 +30,5 @@ dev-venv/
 test/observability/dnsfault/state/fault.conf
 # Local observability stack: the demo CA and certificates, made by make obs/up
 test/observability/tls/out/
+# Local observability stack: the fake cluster's Secrets, grants and ConfigMap
+test/observability/kube/state/

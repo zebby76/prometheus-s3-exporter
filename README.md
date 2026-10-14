@@ -2,7 +2,9 @@
 
 [![Code style: black](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/psf/black)
 
-Exposes the size and object count of an S3 bucket as Prometheus metrics.
+Watches S3 buckets for Prometheus: whether each one can be reached -- DNS, TCP,
+TLS, then S3 -- and, in the background, its size and object count. One exporter
+watches one bucket, or a list of them (6.0.0).
 
 - metrics: `:9773/metrics`
 - liveness: `:9774/healthz`
@@ -79,10 +81,6 @@ Set `COLLECTOR_SOURCE` to override `source` at runtime without editing the
 mounted ConfigMap.
 
 ## Multi-bucket configuration
-
-> **In progress for 6.0.0.** The list is watched: credentials, probes and
-> collections for every bucket. Still to come: network checks per endpoint and
-> reloading the list without a restart.
 
 Without `buckets:` the exporter watches one bucket, named by the environment:
 `S3_BUCKET_NAME`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`,
@@ -171,8 +169,10 @@ kind: RoleBinding
 metadata: { name: s3-exporter-read, namespace: app-a }
 roleRef: { apiGroup: rbac.authorization.k8s.io, kind: Role, name: s3-exporter-read }
 subjects:
-  - { kind: ServiceAccount, name: s3-exporter, namespace: monitoring }
+  - { kind: ServiceAccount, name: s3-exporter, namespace: s3-exporter }
 ```
+
+`deploy/openshift/rbac-app-namespace.yaml` holds the pair, ready to copy.
 
 Never a ClusterRole on Secrets: the exporter must read the Secrets it is given
 and nothing else.
@@ -286,6 +286,62 @@ volumeMounts:
 The exporter warns at startup when its configuration file is mounted on its own.
 Mounting the ConfigMap elsewhere works too, with `COLLECTOR_CONFIG` pointing at
 the file.
+
+## Deploying on OpenShift
+
+`deploy/openshift/` holds a complete example, validated against the Kubernetes
+schemas:
+
+| File | What |
+| --- | --- |
+| `serviceaccount.yaml` | the exporter's identity; no right in its own namespace |
+| `rbac-app-namespace.yaml` | per application namespace: a Role with `get` on the Secrets it names (`resourceNames`), and a RoleBinding to the exporter's ServiceAccount, across namespaces |
+| `configmap.yaml` | `collector.yml` with the bucket list and the Secrets' key names |
+| `deployment.yaml` | one replica, the ConfigMap mounted as a directory, probes, resources, a read-only root filesystem |
+| `service.yaml`, `servicemonitor.yaml` | scraped by user-workload monitoring |
+| `podmonitor.yaml` | the alternative to the Service and ServiceMonitor: one or the other, not both |
+| `networkpolicy.yaml` | ingress only from user-workload monitoring (metrics) and the kubelet (probes); egress open |
+
+What matters, in order:
+
+1. **One Role and RoleBinding per application namespace**, listing that
+   namespace's Secrets in `resourceNames`. `get` only: `list` or `watch` would
+   hand out every Secret there. Never a ClusterRole on Secrets.
+2. **The ConfigMap mounted as a directory**, never with `subPath`, or changes to
+   the list need a restart (see
+   [Reloading the configuration](#reloading-the-configuration)).
+3. **`--check-config` before going live**, to find the Secret, key or
+   RoleBinding still missing:
+   `oc exec deploy/s3-exporter -- exporter --check-config`.
+4. **Readiness** answers 503 only when every bucket fails, so one bucket down
+   never takes the others' metrics out of service. Keep `failureThreshold` at 3
+   or more.
+5. **One replica.** Two would probe and list every bucket twice; the exporter
+   holds no state worth a second copy, and a restart costs one detection per
+   bucket.
+
+Sizing: about 160 MB of memory for a hundred buckets, and almost no CPU at rest.
+The CPU goes to the listings, about 86 us per object; a throttled exporter lists
+slower, and its probes are not affected. See
+[Watching many buckets](#watching-many-buckets) for measurements.
+
+### Migrating from one deployment per bucket
+
+The single-bucket deployments keep working with 6.0.0 unchanged, apart from the
+renames listed in the changelog. To move to one exporter:
+
+1. Create the Roles and RoleBindings in every application namespace.
+2. Write the ConfigMap with one entry per bucket: `secret` and `namespace` of the
+   Secret the old deployment took its variables from, and `secret_keys` with
+   their key names.
+3. Deploy the new exporter **next to the old ones** and run `--check-config`.
+   Every bucket should resolve.
+4. Compare on the dashboard: the same buckets appear twice, once per exporter,
+   with the same figures. A bucket's `bucket_namespace` is now its Secret's
+   namespace; it matches the old label only where the old deployment ran in
+   the application's namespace -- check the alerts that filter on it.
+5. Delete the old deployments and their PodMonitor; scrape the new exporter
+   with `servicemonitor.yaml`.
 
 ## Metrics
 
@@ -683,6 +739,33 @@ groups:
           summary: "{{ $labels.name }}: a collection eats half its interval"
 ```
 
+## Dashboard
+
+`test/observability/grafana/dashboards/s3.dashboard.json` is a Grafana
+dashboard (built on 10.2) that reads the same whether one exporter watches a
+hundred buckets or a hundred exporters watch one each. Buckets are keyed by
+`(bucket_namespace, name)`, so the same bucket name in two namespaces stays two
+rows. Import it into Grafana; it keeps the uid `s3-exporter-table`, so an import
+replaces an earlier version.
+
+| Section | Shows |
+| --- | --- |
+| header | buckets watched and not watched, unreachable, endpoints down, collections overdue, configuration rejected or waiting for a restart, the certificate closest to its end |
+| Buckets | one row per bucket, unreachable first: probe latency, errors and main error of the last hour, staleness, size, collection, interval in force, endpoint; and the buckets whose credentials cannot be read |
+| Problems | only what needs looking at: reachability of the buckets that failed in the range, the ten slowest probes, errors by reason, the largest buckets, the slowest collections |
+| Endpoints | per endpoint: up, DNS, TCP and TLS times, days left on the certificate, failures and where; the phases over time |
+| Exporters | per pod: buckets, collections running and overdue, configuration state, CPU, memory, throttling |
+| Logs | the exporters' events from Loki |
+
+Variables: the Prometheus and Loki datasources, `namespace`, `bucket`,
+`endpoint`, and the Loki *Log selector* (e.g.
+`{namespace="s3-exporter", container="s3-exporter"}`).
+
+The CPU, memory and throttling columns join cAdvisor's series on
+`(namespace, pod)`: they need a datasource that sees both the container metrics
+and the exporters -- on OpenShift, Thanos Querier rather than the user-workload
+Prometheus alone.
+
 ## Sizing the interval
 
 With the `list` source the cost of a cycle tracks the **number of objects**, not
@@ -757,16 +840,29 @@ make down
 
 ### Observability stack
 
-`test/observability` runs the exporter the way production does, one instance per
-bucket, behind the same kind of path: a cluster DNS with OpenShift's search list
-and `ndots:5`, and a load balancer with an idle timeout. Prometheus, Loki and
-Grafana sit behind Traefik, taken from base-php's `test/demo-infra`.
+`test/observability` runs the exporter the way production does, both ways: one
+instance per bucket, and one for a list of buckets whose credentials come from
+Secrets through a Kubernetes API. Both sit behind the same kind of path: a
+cluster DNS with OpenShift's search list and `ndots:5`, and a load balancer with
+an idle timeout. Prometheus, Loki and Grafana sit behind Traefik, taken from
+base-php's `test/demo-infra`.
 
 ```text
 exporter-{small,medium,large} --DNS--> dnsfault --> CoreDNS
                               --S3---> lb (HAProxy, :8333) --> SeaweedFS
 exporter-tls                  --S3---> lb (HAProxy, :8443 TLS) --> SeaweedFS
+exporter-multi                --S3---> both
+                              --API--> kube-api (Secrets, Roles, the ServiceAccount)
 ```
+
+`exporter-multi` lists 18 buckets over three application namespaces
+(`app-a`, `app-b`, `app-c`): Secrets read through `kube-api` with the key names
+production uses, one bucket over TLS, the 50 000-object one, one probed only,
+two from `envFrom` variables, and one whose Secret does not exist yet. Its
+`collector.yml` is a ConfigMap volume and reloads. `kube-api` is a small fake of
+the API server: Bearer token checked (401), a Role per Secret (403 without
+one), 404 for a missing Secret. Its state lives in `kube/state` (never
+committed), rebuilt by `make obs/kube/reset`.
 
 `exporter-tls` reaches the same storage over TLS, trusting a demo CA through
 `AWS_CA_BUNDLE`, so the endpoint check has a handshake to time and to break.
@@ -774,7 +870,7 @@ exporter-tls                  --S3---> lb (HAProxy, :8443 TLS) --> SeaweedFS
 committed); `make obs/down` drops them.
 
 ```bash
-make obs/up       # build, start, fill four buckets with random content (first run: a few minutes)
+make obs/up       # build, start, fill the buckets with random content (first run: a few minutes)
 make obs/urls     # Grafana, Prometheus, Loki, the exporters
 make obs/down     # stop and drop the volumes
 ```
@@ -794,15 +890,24 @@ Faults, cleared by `make obs/chaos/off`:
 | `obs/chaos/tls-expired` | the TLS listener presents an expired certificate |
 | `obs/chaos/tls-expiring` | the TLS certificate ends in 10 days: the exporter warns |
 
-Grafana comes provisioned with the **S3 buckets** dashboard
-(`test/observability/grafana/dashboards/s3.dashboard.json`): the per-bucket
-table, and a *Connectivity diagnosis* row -- probe errors by reason, DNS
-resolution time with the 5s resolver timeout marked, probe latency against new
-connections, reachability, and the probe's log lines from Loki. It works against
-a production Prometheus as is; point its *Log selector* variable at wherever the
-exporters' logs live. The table's CPU, memory and throttling columns come from
-cAdvisor, relabelled so its series join on `(namespace, pod)` like the kubelet's,
-the container ID standing in for the pod name.
+The fake cluster, cleared by `make obs/kube/reset` (`NAME` is
+`namespace/secret`):
+
+| Target | Effect |
+| --- | --- |
+| `obs/kube/forbid [NAME=…]` | drops the Role's grant: 403, as a missing RoleBinding |
+| `obs/kube/allow [NAME=…]` | grants it again |
+| `obs/kube/delete [NAME=…]` | deletes the Secret: 404 |
+| `obs/kube/wrong-key [NAME=…]` | a key S3 rejects: the Secret is read again at once |
+| `obs/kube/repoint [NAME=… BUCKET=…]` | the Secret names another bucket: watched from scratch |
+| `obs/kube/config-add` | adds a bucket to the ConfigMap |
+| `obs/kube/config-remove` | removes one |
+| `obs/kube/config-broken` | publishes invalid YAML: rejected, the previous list kept |
+
+Grafana comes provisioned with the [dashboard](#dashboard), fed by every
+exporter of the stack at once. cAdvisor is relabelled so its series join on
+`(namespace, pod)` like the kubelet's, the container ID standing in for the pod
+name.
 
 `dnsfault` is a small UDP relay in front of CoreDNS. CoreDNS cannot disturb a
 name it resolves itself: its `erratic` plugin runs after `hosts` and `forward`.

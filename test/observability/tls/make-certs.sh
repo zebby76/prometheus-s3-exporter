@@ -7,6 +7,7 @@
 #   wrong-name.pem  other.storage.internal                    (name mismatch)
 #   expired.pem     s3.storage.internal, ended in 2020        (expired)
 #   expiring.pem    s3.storage.internal, ends in 10 days      (the 14-day warning)
+#   kube-api.pem    kube-api, valid a year                    (the fake Kubernetes API)
 #
 # HAProxy wants the certificate and its key in one file.
 set -eu
@@ -33,8 +34,9 @@ issue server s3.storage.internal -days 365
 issue wrong-name other.storage.internal -days 365
 issue expired s3.storage.internal -not_before 20200101000000Z -not_after 20200201000000Z
 issue expiring s3.storage.internal -days 10
+issue kube-api kube-api -days 365
 
 # Read by HAProxy's own user; test material only.
 chmod 644 ./*.pem
 rm -f ca.srl
-echo "TLS material in ${out}: ca.pem server.pem wrong-name.pem expired.pem expiring.pem"
+echo "TLS material in ${out}: ca.pem server.pem wrong-name.pem expired.pem expiring.pem kube-api.pem"

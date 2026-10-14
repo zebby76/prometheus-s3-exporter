@@ -85,6 +85,7 @@ lint: ## lint : run super-linter locally over the whole codebase
 		-e VALIDATE_PYTHON_PYINK=false \
 		-e VALIDATE_JSCPD=false \
 		-e "FILTER_REGEX_EXCLUDE=_version.py|versioneer.py" \
+		-e "KUBERNETES_KUBECONFORM_OPTIONS=-schema-location default -schema-location https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json" \
 		-v $(CURRENT_DIR):/tmp/lint \
 		ghcr.io/super-linter/super-linter:slim-v7.4.0
 
@@ -116,6 +117,10 @@ OBS_DIR                     := test/observability
 OBS                         := docker compose --project-directory $(OBS_DIR) -f $(OBS_DIR)/compose.yaml
 OBS_FAULT                   := $(OBS_DIR)/dnsfault/state/fault.conf
 OBS_TLS                     := $(OBS_DIR)/tls/out
+# The fake cluster's state (Secrets, grants, the multi-bucket exporter's ConfigMap), see kube/state.py.
+OBS_KUBE                    := docker run --rm -u "$$(id -u):$$(id -g)" --env-file $(OBS_DIR)/.env \
+                               -v "$(CURDIR)/$(OBS_DIR)/kube:/kube" -v "$(CURDIR)/$(OBS_TLS):/tls:ro" \
+                               docker.io/library/python:3.12-slim-trixie python3 /kube/state.py
 # Prometheus discovers its targets through the Docker socket, whose group differs from one host to the next.
 export DOCKER_GID           ?= $(shell stat -c %g /var/run/docker.sock 2>/dev/null || echo 0)
 # Only the storage endpoint's queries are disturbed, search-list expansions included.
@@ -132,15 +137,21 @@ IDLE                        ?= 25s
 
 obs/up: ## obs/up : build the dev image, start the stack, fill the buckets, wait until everything is up
 	@[ -f $(OBS_FAULT) ] || printf 'mode=off\n' > $(OBS_FAULT)
-	@[ -f $(OBS_TLS)/server.pem ] || docker run --rm -u "$$(id -u):$$(id -g)" -v "$(CURDIR)/$(OBS_DIR)/tls:/tls" \
-		--entrypoint sh docker.io/library/haproxy:3.2 /tls/make-certs.sh
+	@# A new CA invalidates every certificate in use: whatever loaded the old ones is recreated with the new.
+	@if [ ! -f $(OBS_TLS)/kube-api.pem ]; then \
+		docker run --rm -u "$$(id -u):$$(id -g)" -v "$(CURDIR)/$(OBS_DIR)/tls:/tls" \
+			--entrypoint sh docker.io/library/haproxy:3.2 /tls/make-certs.sh && \
+		$(OBS) rm -sf lb kube-api exporter-tls exporter-multi >/dev/null 2>&1; \
+		rm -rf $(OBS_DIR)/kube/state; \
+	fi
+	@$(OBS_KUBE) init
 	@$(OBS) up -d --build --wait --wait-timeout 600
 	@$(MAKE) --no-print-directory obs/urls
 
 obs/down: ## obs/down : stop the stack and drop its volumes (buckets, metrics, logs)
 	@$(OBS) down -v --remove-orphans
 	@rm -f $(OBS_FAULT)
-	@rm -rf $(OBS_TLS)
+	@rm -rf $(OBS_TLS) $(OBS_DIR)/kube/state
 
 obs/seed: ## obs/seed [ SEED_BUCKETS=name:count:min:max,... ] : create or complete the demo buckets
 	@$(OBS) run --rm $${SEED_BUCKETS:+-e BUCKETS=$$SEED_BUCKETS} seed
@@ -158,7 +169,7 @@ obs/urls: ## obs/urls : print the stack's entry points
 	 echo "Prometheus  http://prometheus.localhost$$s"; \
 	 echo "Loki        http://loki.localhost$$s"; \
 	 echo "Alloy       http://alloy.localhost$$s"; \
-	 echo "Exporters   http://{small,medium,large,tls}.exporter.localhost$$s/metrics"; \
+	 echo "Exporters   http://{small,medium,large,tls,multi}.exporter.localhost$$s/metrics"; \
 	 echo "Traefik     http://localhost:$${OBS_TRAEFIK_PORT:-8888}"; \
 	 echo "DNS fault   $$(tr '\n' ' ' < $(OBS_FAULT) 2>/dev/null || echo 'mode=off')"
 
@@ -209,6 +220,40 @@ obs/chaos/off: ## obs/chaos/off : clear the DNS fault, restart the storage and t
 	@$(OBS) up -d seaweedfs
 	@$(OBS) up -d --force-recreate lb
 	@echo "All faults cleared"
+
+.PHONY: obs/kube/reset obs/kube/forbid obs/kube/allow obs/kube/delete obs/kube/wrong-key obs/kube/repoint \
+	obs/kube/config-add obs/kube/config-remove obs/kube/config-broken
+
+# The multi-bucket exporter's fake cluster. NAME is namespace/secret, e.g. NAME=app-a/app-a-uploads-s3.
+NAME                        ?= app-a/app-a-uploads-s3
+BUCKET                      ?= bucket-small
+
+obs/kube/reset: ## obs/kube/reset : put back every Secret, Role and the multi-bucket exporter's ConfigMap
+	@$(OBS_KUBE) reset
+
+obs/kube/forbid: ## obs/kube/forbid [ NAME=ns/secret ] : drop the Role's grant on a Secret (403, a missing RoleBinding)
+	@$(OBS_KUBE) forbid $(NAME)
+
+obs/kube/allow: ## obs/kube/allow [ NAME=ns/secret ] : grant it again
+	@$(OBS_KUBE) allow $(NAME)
+
+obs/kube/delete: ## obs/kube/delete [ NAME=ns/secret ] : delete a Secret (404)
+	@$(OBS_KUBE) delete $(NAME)
+
+obs/kube/wrong-key: ## obs/kube/wrong-key [ NAME=ns/secret ] : put a key S3 rejects in a Secret
+	@$(OBS_KUBE) wrong-key $(NAME)
+
+obs/kube/repoint: ## obs/kube/repoint [ NAME=ns/secret BUCKET=... ] : point a Secret at another bucket
+	@$(OBS_KUBE) repoint $(NAME) $(BUCKET)
+
+obs/kube/config-add: ## obs/kube/config-add : add a bucket to the multi-bucket exporter's ConfigMap
+	@$(OBS_KUBE) config-add
+
+obs/kube/config-remove: ## obs/kube/config-remove : remove a bucket from it
+	@$(OBS_KUBE) config-remove
+
+obs/kube/config-broken: ## obs/kube/config-broken : publish a collector.yml that is not valid YAML
+	@$(OBS_KUBE) config-broken
 
 # —— Docker build —————————————————————————————————————————————————————————————————————————————————————————————————————
 

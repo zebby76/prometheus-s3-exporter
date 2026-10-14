@@ -1,7 +1,8 @@
 """Create the demo buckets and fill them with random content.
 
-One bucket per exporter instance, as in production. Sizes differ by orders of
-magnitude so the listing's cost shows on the collection metrics. Idempotent:
+One bucket per single-bucket exporter, as before 6.0.0, and a set spread over
+three application namespaces for the multi-bucket one. Sizes differ by orders
+of magnitude so the listing's cost shows on the collection metrics. Idempotent:
 a bucket that already holds its objects is left alone, a partial one is
 completed, so `make obs/seed` can run again after an interruption.
 
@@ -21,7 +22,23 @@ DEFAULT_BUCKETS = (
     "bucket-small:200:1024:524288,"
     "bucket-medium:5000:1024:65536,"
     "bucket-large:50000:1024:8192,"
-    "bucket-tls:100:1024:65536"
+    "bucket-tls:100:1024:65536,"
+    # The multi-bucket exporter's buckets, one application namespace each.
+    "app-a-uploads:120:1024:65536,"
+    "app-a-archive:80:1024:131072,"
+    "app-a-reports:40:1024:32768,"
+    "app-a-media:60:1024:262144,"
+    "app-a-exports:30:1024:16384,"
+    "app-b-uploads:120:1024:65536,"
+    "app-b-archive:80:1024:131072,"
+    "app-b-reports:40:1024:32768,"
+    "app-b-media:60:1024:262144,"
+    "app-b-exports:30:1024:16384,"
+    "app-c-uploads:120:1024:65536,"
+    "app-c-archive:80:1024:131072,"
+    "app-c-reports:40:1024:32768,"
+    "app-c-media:60:1024:262144,"
+    "app-c-exports:30:1024:16384"
 )
 WORKERS = int(os.getenv("SEED_WORKERS", "32"))
 

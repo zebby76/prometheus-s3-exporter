@@ -1,0 +1,29 @@
+---
+# Mounted as a directory (deployment.yaml), so a change is reloaded within
+# about two minutes, without a restart. The key must be collector.yml.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: s3-exporter-config
+  namespace: s3-exporter
+data:
+  collector.yml: |
+    kind: PrometheusExporterConfig
+    configuration:
+      # Probes every 30 s; sizes in the background, hourly, stretched for
+      # buckets whose listing takes long.
+      - interval: 60
+      - source: list
+      - connectivity_interval: 30
+      - max_concurrent_collections: 2
+      # The key names inside every application's Secret, which also holds
+      # the bucket name.
+      - secret_keys:
+          access_key: S3_ACCESS_KEY
+          secret_key: S3_SECRET_KEY
+          bucket: S3_BUCKET
+      - buckets:
+          - { secret: app-a-s3, namespace: app-a }
+          - { secret: app-b-s3, namespace: app-b }
+          # Too large to list: probed only.
+          - { secret: app-c-s3, namespace: app-c, collect: false }

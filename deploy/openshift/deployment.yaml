@@ -1,0 +1,105 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: s3-exporter
+  namespace: s3-exporter
+  labels:
+    app.kubernetes.io/name: s3-exporter
+  annotations:
+    # Deliberate, for checkov: the token is how the exporter reads the
+    # Secrets; OpenShift's restricted SCC picks the UID from the namespace's
+    # range; pin the digest of the release you deploy.
+    checkov.io/skip1: CKV_K8S_38=The ServiceAccount token reads the Secrets
+    checkov.io/skip2: CKV_K8S_40=The SCC assigns the UID
+    checkov.io/skip3: CKV_K8S_43=Pin the digest of the release you deploy
+spec:
+  # One replica: two would probe and list every bucket twice.
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: s3-exporter
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: s3-exporter
+    spec:
+      serviceAccountName: s3-exporter
+      # The token is how it reads the Secrets.
+      automountServiceAccountToken: true
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: s3-exporter
+          # Pin by digest in production: a tag can move under a running
+          # deployment.
+          image: docker.io/smalswebtech/prometheus-s3-exporter:6.0.0
+          imagePullPolicy: Always
+          ports:
+            - name: metrics
+              containerPort: 9773
+            - name: health
+              containerPort: 9774
+          env:
+            - name: AWS_ENDPOINT_URL
+              value: https://s3.example.internal:8082
+            - name: AWS_DEFAULT_REGION
+              value: us-east-1
+            # The label of buckets configured with env_prefix and no namespace.
+            - name: OPENSHIFT_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            # Behind a private CA, mount it and point both the S3 client and
+            # the endpoint checks at it:
+            # - name: AWS_CA_BUNDLE
+            #   value: /etc/s3-ca/ca.crt
+          volumeMounts:
+            # The whole directory, never with subPath: Kubernetes never
+            # updates a subPath mount, and the reload would see nothing.
+            - name: config
+              mountPath: /app/config
+              readOnly: true
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            periodSeconds: 30
+          readinessProbe:
+            # 503 only when every bucket is unreachable or unconfigured.
+            httpGet:
+              path: /readyz
+              port: health
+            periodSeconds: 30
+            failureThreshold: 3
+          resources:
+            # About 160 MB for a hundred buckets. CPU goes to the listings
+            # (about 86 us per object); a throttled exporter lists slower,
+            # its probes are not affected.
+            requests:
+              cpu: 100m
+              memory: 192Mi
+            limits:
+              cpu: 500m
+              memory: 384Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop: [ALL]
+      volumes:
+        - name: config
+          configMap:
+            name: s3-exporter-config
+      # Optional: with OpenShift's ndots:5, a name with fewer dots goes
+      # through the whole search list first. Measure
+      # webtech_s3_endpoint_dns_duration_seconds before and after.
+      # dnsConfig:
+      #   options:
+      #     - name: ndots
+      #       value: "2"

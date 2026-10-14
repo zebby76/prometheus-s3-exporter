@@ -4,14 +4,17 @@ Everything the multi-bucket exporter reads from "Kubernetes" lives under
 kube/state (never committed), rebuilt by `init`:
 
 - sa/            its ServiceAccount: token, ca.crt, namespace
-- secrets.json   the applications' Secrets, by `namespace/name`
-- rbac.json      the Secrets each Role lets the ServiceAccount `get`
+- secrets.json   the applications' Secrets, by `namespace/name`: data, labels
+                 and annotations
+- rbac.json      the Secrets each Role lets the ServiceAccount `get`, and the
+                 namespaces where it may `list` them (discovery)
 - config/        its collector.yml, a ConfigMap volume: every change is a new
                  directory and an atomic swap of the `..data` link, as the
                  kubelet does it
 
 Usage: state.py init|reset|forbid|allow|delete|wrong-key|repoint|config-add|
-       config-remove|config-broken [args]
+       config-remove|config-broken|label|unlabel|annotate|forbid-list|
+       allow-list [args]
 """
 
 from __future__ import annotations
@@ -31,9 +34,16 @@ SECRET_KEY = os.environ.get("S3_SECRET_KEY", "s3admin-secret")
 
 TLS_ENDPOINT = "https://s3.storage.internal:8443"
 
+# app-b's Secrets are found by label, not named in the configuration: its Role
+# allows `list`. app-a and app-c keep named entries and `get`.
+DISCOVERED = "app-b"
+SELECTOR_LABEL = ("s3-exporter/watch", "true")
+PREFIX = "s3-exporter"
+
 # (namespace, Secret name, bucket, extra keys of the entry). The applications
 # name their Secrets as they please; the key names are the same in all of them,
-# and not the AWS ones -- as in production.
+# and not the AWS ones -- as in production. In app-b, discovered, the extra keys
+# become annotations of the Secret.
 SECRETS = [
     ("app-a", "app-a-uploads-s3", "app-a-uploads", {}),
     ("app-a", "app-a-archive-s3", "app-a-archive", {}),
@@ -53,11 +63,16 @@ SECRETS = [
     # The heavy one: 50 000 objects, collected less often.
     ("app-c", "app-c-large-s3", "bucket-large", {"interval": "10"}),
 ]
+# Laid out differently from the others: its annotations name its keys.
+ODD_LAYOUT = ("app-b", "app-b-media-s3")
 # Listed in the configuration, but nobody created the Secret yet: shows as not
-# watched until `make obs/kube/reset` or a Secret appears.
+# watched until `make obs/kube/reset` or a Secret appears. A named entry in the
+# discovered namespace: both forms mix.
 PENDING = ("app-b", "app-b-pending-s3")
 # Created, granted, but not in the configuration until `config-add`.
 SPARE = ("app-a", "app-a-spare-s3", "bucket-small")
+# In app-b, but without the label until `make obs/kube/label`.
+UNLABELLED = ("app-b", "app-b-spare-s3", "bucket-medium")
 # The fallback: variables laid out by envFrom with a prefix (see compose.yaml).
 ENV_PREFIXES = [("app-c", "APP_C_MEDIA_"), ("app-c", "APP_C_EXPORTS_")]
 
@@ -78,8 +93,28 @@ def _save(name: str, value: dict):
     _write(STATE / name, json.dumps(value, indent=2, sort_keys=True) + "\n")
 
 
-def _secret(bucket: str) -> dict:
-    return {"S3_KEY": ACCESS_KEY, "S3_SECRET": SECRET_KEY, "S3_BUCKET": bucket}
+def _secret(bucket: str, labels=None, annotations=None) -> dict:
+    return {
+        "data": {"S3_KEY": ACCESS_KEY, "S3_SECRET": SECRET_KEY, "S3_BUCKET": bucket},
+        "labels": dict(labels or {}),
+        "annotations": dict(annotations or {}),
+    }
+
+
+def _odd_layout(bucket: str, labels: dict) -> dict:
+    return {
+        "data": {"ak": ACCESS_KEY, "sk": SECRET_KEY, "bucket": bucket},
+        "labels": labels,
+        "annotations": {
+            f"{PREFIX}/access-key-field": "ak",
+            f"{PREFIX}/secret-key-field": "sk",
+            f"{PREFIX}/bucket-field": "bucket",
+        },
+    }
+
+
+def _bucket_field(secret: dict) -> str:
+    return secret["annotations"].get(f"{PREFIX}/bucket-field", "S3_BUCKET")
 
 
 def _entry(namespace: str, name: str, extra: dict) -> str:
@@ -92,8 +127,12 @@ def config_text(add_spare=False, remove=()) -> str:
     entries = [
         _entry(namespace, name, extra)
         for namespace, name, _, extra in SECRETS
-        if name not in remove
+        if name not in remove and namespace != DISCOVERED
     ]
+    entries.append(
+        f'      - {{ selector: "{SELECTOR_LABEL[0]}={SELECTOR_LABEL[1]}", '
+        f"namespace: {DISCOVERED} }}"
+    )
     entries.append(_entry(*PENDING, {}))
     if add_spare:
         entries.append(_entry(SPARE[0], SPARE[1], {}))
@@ -110,6 +149,8 @@ def config_text(add_spare=False, remove=()) -> str:
         "  - interval: 2\n"
         "  - connectivity_interval: 30\n"
         "  - config_reload_interval: 15\n"
+        "  # app-b's Secrets are listed this often; production keeps 60.\n"
+        "  - discovery_interval: 15\n"
         "  # A minute, so a fixed Secret or RoleBinding shows quickly; production keeps 300.\n"
         "  - credentials_refresh: 60\n"
         "  - secret_keys: { access_key: S3_KEY, secret_key: S3_SECRET, bucket: S3_BUCKET }\n"
@@ -150,13 +191,29 @@ def init(force=False):
     _write(sa / "namespace", "s3-exporter")
     _write(sa / "ca.crt", CA.read_text(encoding="utf-8"))
 
-    all_secrets = {f"{ns}/{name}": _secret(bucket) for ns, name, bucket, _ in SECRETS}
+    label = dict([SELECTOR_LABEL])
+    all_secrets = {}
+    for ns, name, bucket, extra in SECRETS:
+        if ns != DISCOVERED:
+            all_secrets[f"{ns}/{name}"] = _secret(bucket)
+        elif (ns, name) == ODD_LAYOUT:
+            all_secrets[f"{ns}/{name}"] = _odd_layout(bucket, label)
+        else:
+            annotations = {
+                f"{PREFIX}/{key}": str(value) for key, value in extra.items()
+            }
+            all_secrets[f"{ns}/{name}"] = _secret(bucket, label, annotations)
     all_secrets[f"{SPARE[0]}/{SPARE[1]}"] = _secret(SPARE[2])
+    all_secrets[f"{UNLABELLED[0]}/{UNLABELLED[1]}"] = _secret(UNLABELLED[2])
     _save("secrets.json", all_secrets)
-    # One Role per application namespace, restricted to the Secrets it lists;
-    # the pending one is granted, it just does not exist.
-    granted = sorted(set(all_secrets) | {f"{PENDING[0]}/{PENDING[1]}"})
-    _save("rbac.json", {"get_secrets": granted})
+    # One Role per application namespace: `get` restricted to the Secrets it
+    # names -- the pending one is granted, it just does not exist --, and
+    # `list` where the Secrets are discovered.
+    granted = sorted(
+        {ref for ref in all_secrets if not ref.startswith(f"{DISCOVERED}/")}
+        | {f"{PENDING[0]}/{PENDING[1]}"}
+    )
+    _save("rbac.json", {"get_secrets": granted, "list_secrets": [DISCOVERED]})
     publish_config(config_text())
     print(f"state written to {STATE}: {len(all_secrets)} secrets")
 
@@ -190,16 +247,63 @@ def delete(name):
 
 def wrong_key(name):
     found = _load("secrets.json")
-    found[_ref(name)]["S3_KEY"] = "not-a-key"
+    data = found[_ref(name)]["data"]
+    for key, value in data.items():
+        if value == ACCESS_KEY:
+            data[key] = "not-a-key"
     _save("secrets.json", found)
-    print(f"{name}: S3_KEY no longer valid (S3 answers InvalidAccessKeyId)")
+    print(f"{name}: access key no longer valid (S3 answers InvalidAccessKeyId)")
 
 
 def repoint(name, bucket):
     found = _load("secrets.json")
-    found[_ref(name)]["S3_BUCKET"] = bucket
+    secret = found[_ref(name)]
+    secret["data"][_bucket_field(secret)] = bucket
     _save("secrets.json", found)
     print(f"{name}: now names bucket {bucket}")
+
+
+def label(name):
+    found = _load("secrets.json")
+    found[_ref(name)]["labels"][SELECTOR_LABEL[0]] = SELECTOR_LABEL[1]
+    _save("secrets.json", found)
+    print(f"{name}: labelled {SELECTOR_LABEL[0]}={SELECTOR_LABEL[1]}")
+
+
+def unlabel(name):
+    found = _load("secrets.json")
+    found[_ref(name)]["labels"].pop(SELECTOR_LABEL[0], None)
+    _save("secrets.json", found)
+    print(f"{name}: label {SELECTOR_LABEL[0]} removed")
+
+
+def annotate(name, key, value=""):
+    """`value` empty removes the annotation; `key` without a `/` is ours."""
+    key = key if "/" in key else f"{PREFIX}/{key}"
+    found = _load("secrets.json")
+    annotations = found[_ref(name)]["annotations"]
+    if value:
+        annotations[key] = value
+    else:
+        annotations.pop(key, None)
+    _save("secrets.json", found)
+    print(f"{name}: {key}={value}" if value else f"{name}: {key} removed")
+
+
+def forbid_list(namespace):
+    rbac = _load("rbac.json")
+    rbac["list_secrets"] = [
+        ns for ns in rbac.get("list_secrets", []) if ns != namespace
+    ]
+    _save("rbac.json", rbac)
+    print(f"{namespace}: Role no longer grants `list` on secrets (403)")
+
+
+def allow_list(namespace):
+    rbac = _load("rbac.json")
+    rbac["list_secrets"] = sorted(set(rbac.get("list_secrets", [])) | {namespace})
+    _save("rbac.json", rbac)
+    print(f"{namespace}: `list` on secrets granted")
 
 
 COMMANDS = {
@@ -213,6 +317,11 @@ COMMANDS = {
     "config-add": lambda: publish_config(config_text(add_spare=True)),
     "config-remove": lambda: publish_config(config_text(remove={"app-a-reports-s3"})),
     "config-broken": lambda: publish_config("configuration:\n  - buckets: [ {\n"),
+    "label": label,
+    "unlabel": unlabel,
+    "annotate": annotate,
+    "forbid-list": forbid_list,
+    "allow-list": allow_list,
 }
 
 

@@ -129,11 +129,16 @@ class CredentialsRefresher:
         interval_seconds: float,
         stop: threading.Event,
         on_change: Optional[Callable[[], None]] = None,
+        before_refresh: Optional[Callable[[List], None]] = None,
     ):
         self.monitors = monitors
         self.interval_seconds = interval_seconds
         self._stop = stop
         self.on_change = on_change
+        # Called with the monitors whose key S3 rejected, before they read their
+        # credentials again: a discovered Secret's are only as fresh as the
+        # last list of its namespace.
+        self.before_refresh = before_refresh
         self._requested = threading.Event()
         self._thread: Optional[threading.Thread] = None
 
@@ -163,7 +168,13 @@ class CredentialsRefresher:
                 return
             if requested:
                 self._requested.clear()
-                self._refresh([m for m in self.monitors if m.needs_refresh])
+                stale = [m for m in self.monitors if m.needs_refresh]
+                if stale and self.before_refresh is not None:
+                    try:
+                        self.before_refresh(stale)
+                    except Exception:
+                        logging.exception("Listing the rejected Secrets again failed")
+                self._refresh(stale)
             if time.monotonic() >= deadline:
                 self.refresh_all()
                 deadline = time.monotonic() + self.interval_seconds

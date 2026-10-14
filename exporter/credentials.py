@@ -164,3 +164,66 @@ class KubernetesSecretCredentials(CredentialSource):
 
     def _lookup_name(self, key: str) -> str:
         return key
+
+
+class ListedSecretCredentials(CredentialSource):
+    """A Secret found by a label selector, read from the discovery's last list.
+
+    Never a `get`: the Role of a discovered namespace only allows `list`, and
+    the list already carries the values. `listing` is the SecretDiscovery that
+    found it, with `values(name)`.
+    """
+
+    def __init__(
+        self,
+        listing,
+        name: str,
+        keys: Mapping[str, str],
+        bucket_name: Optional[str] = None,
+    ):
+        super().__init__(keys, bucket_name)
+        self.listing = listing
+        self.namespace = listing.namespace
+        self.secret = name
+
+    def describe(self) -> str:
+        return f"secret {self.namespace}/{self.secret}"
+
+    def _where(self) -> tuple:
+        return (self.namespace, self.secret)
+
+    def _values(self) -> Mapping[str, str]:
+        return self.listing.values(self.secret)
+
+    def _lookup_name(self, key: str) -> str:
+        return key
+
+
+class UnusableCredentials(CredentialSource):
+    """A discovered Secret whose annotations cannot be honoured.
+
+    Resolving it always fails with the reason, so the bucket shows as not
+    watched, with that reason in its log line, as any other unreadable Secret.
+    """
+
+    def __init__(self, namespace: str, name: str, reason: str):
+        super().__init__({})
+        self.namespace = namespace
+        self.secret = name
+        self.reason = reason
+
+    def describe(self) -> str:
+        return f"secret {self.namespace}/{self.secret}"
+
+    def identity(self) -> tuple:
+        # The reason too: fixing the annotation is a change of the entry.
+        return super().identity() + (self.reason,)
+
+    def _where(self) -> tuple:
+        return (self.namespace, self.secret)
+
+    def _values(self) -> Mapping[str, str]:
+        raise CredentialsUnavailable(f"{self.describe()}: {self.reason}")
+
+    def _lookup_name(self, key: str) -> str:
+        return key

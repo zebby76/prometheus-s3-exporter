@@ -213,7 +213,7 @@ class ReadinessHandler:
     the behaviour it always had.
     """
 
-    def __init__(self, states, endpoints=None):
+    def __init__(self, states, endpoints=None, discovery=None):
         # A callable returning {bucket key: state entry}.
         self._states = states
         # A callable returning {endpoint: state entry}, or None. Shown, never
@@ -221,6 +221,9 @@ class ReadinessHandler:
         # buckets, and a failed handshake while the probes still pass on their
         # open connections must not take the pod out of service.
         self._endpoints = endpoints
+        # A callable returning {selector key: state entry}, or None. Shown, never
+        # counted either: a list that fails keeps the buckets it found watched.
+        self._discovery = discovery
 
     def on_get(self, _req, resp):
         resp.set_header("Content-Type", "application/json")
@@ -233,6 +236,10 @@ class ReadinessHandler:
         body = {"status": not failing, "buckets": buckets}
         if self._endpoints is not None:
             body["endpoints"] = self._endpoints()
+        if self._discovery is not None:
+            selectors = self._discovery()
+            if selectors:
+                body["discovery"] = selectors
         resp.text = json.dumps(body)
 
 
@@ -301,18 +308,19 @@ def exporter(port=9773, addr="0.0.0.0"):
     return httpd
 
 
-def health(port=9774, addr="0.0.0.0", readiness=None, endpoints=None):
+def health(port=9774, addr="0.0.0.0", readiness=None, endpoints=None, discovery=None):
     """Serve /healthz (and /readyz with probes); returns the server.
 
     `readiness` is a callable returning {bucket key: state entry}; `endpoints`
-    one returning {endpoint: state entry}, for information only.
+    one returning {endpoint: state entry} and `discovery` one returning
+    {selector key: state entry}, both for information only.
     """
     api = falcon.App()
     api.add_route("/healthz", HealthMetricsHandler())
     # Only routed when the probes run: without them there is nothing to base a
     # readiness answer on.
     if readiness is not None:
-        api.add_route("/readyz", ReadinessHandler(readiness, endpoints))
+        api.add_route("/readyz", ReadinessHandler(readiness, endpoints, discovery))
 
     httpd = _serve(api, addr, port, "health-listener")
     logging.debug(

@@ -87,7 +87,9 @@ Without `buckets:` the exporter watches one bucket, named by the environment:
 `AWS_DEFAULT_REGION`, `OPENSHIFT_NAMESPACE` and, optionally, `AWS_ENDPOINT_URL`.
 
 With `buckets:`, one exporter watches a list. Each entry names where the bucket's
-credentials live; the bucket's name comes with them.
+credentials live; the bucket's name comes with them. An entry can also name a
+label selector instead of a Secret: every Secret that carries the label in that
+namespace is a bucket (see [Discovering Secrets by label](#discovering-secrets-by-label)).
 
 ```yaml
 configuration:
@@ -114,6 +116,8 @@ configuration:
         collect: false            # probed, never listed
       - env_prefix: APP_C_        # variables set by envFrom with prefix APP_C_
         namespace: app-c          # label only; default: OPENSHIFT_NAMESPACE
+      - selector: s3-exporter/watch=true   # every Secret with that label...
+        namespace: [app-e, app-f]          # ...in these namespaces
 ```
 
 `AWS_DEFAULT_REGION` and `AWS_ENDPOINT_URL` stay global settings, overridable per
@@ -144,6 +148,8 @@ size can be an hour old. So:
 | `interval` | 60 (list), 5 (single) | minutes between collections, before stretching |
 | `max_concurrent_collections` | 2 | collections running at once |
 | `credentials_refresh` | 300 | seconds between two reads of every bucket's credentials |
+| `discovery_interval` | 60 | seconds between two lists of the selectors' Secrets; 0: only at startup, on reload and on `SIGHUP` |
+| `annotation_prefix` | `s3-exporter` | prefix of the annotations a discovered Secret sets its bucket with |
 
 ### Credentials
 
@@ -200,13 +206,131 @@ the credentials already in hand.
 Whatever the mode, no credential is ever logged, printed or put in an error
 message: they name the Secret, the key or the variable, never what it holds.
 
+### Discovering Secrets by label
+
+Naming every Secret gets tedious past a few dozen buckets. A `selector` entry
+lists the Secrets of a namespace that carry a label instead, and watches one
+bucket per Secret found:
+
+```yaml
+- buckets:
+    - selector: s3-exporter/watch=true   # any Kubernetes label selector: k=v, k!=v,
+                                         # k in (a,b), k, !k, comma-joined (AND)
+      namespace: [app-a, app-b]          # required: one name or a list
+      interval: 120                      # every setting of a named entry, but
+      secret_keys: { access_key: KEY }   # `name`, is a default for the Secrets found
+    - { secret: legacy-s3, namespace: app-c }   # named entries still work alongside
+```
+
+The Secrets are listed every `discovery_interval` seconds (60), at startup, on a
+configuration reload and on `SIGHUP`:
+
+- **a Secret that gains the label** is watched, as a bucket added to the list;
+- **one that loses it, or is deleted,** stops being watched, its series gone;
+- **one whose values change** -- a rotated key -- is read again at once;
+- **a list that fails** -- the API unreachable, a Role missing -- changes
+  nothing: the buckets found before stay watched with the credentials in hand,
+  and `webtech_s3_discovery_up` drops to 0. An API outage never empties the
+  dashboards.
+
+A Secret named by an entry **and** found by a selector is watched once, as its
+named entry says. One found by two selectors goes to the first in the file.
+
+**The price: `list` hands out every Secret of the namespace.** RBAC cannot
+filter on labels, and a `list` answer carries the values, as a `get` does. The
+selector sorts what the exporter reads; it does not limit what it may read.
+Grant it namespace by namespace, where that is acceptable, and keep named
+entries -- `get` restricted by `resourceNames` -- where it is not:
+
+```yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: { name: s3-exporter-discover, namespace: app-a }
+rules:
+  - apiGroups: [""]
+    resources: [secrets]
+    verbs: [list]   # no get, no watch: the list carries the values already
+```
+
+with the same RoleBinding as above;
+`deploy/openshift/rbac-app-namespace-discovery.yaml` holds the pair. Never a
+ClusterRole: there is no discovery across the whole cluster.
+
+#### Annotations
+
+A discovered Secret has no entry of its own in `collector.yml`: its annotations
+play that part, and override the `selector` entry for its bucket. Every one is
+optional, and every value is a string (quote numbers and booleans in YAML):
+
+| Annotation | Value | Sets | Default |
+| --- | --- | --- | --- |
+| `s3-exporter/interval` | minutes above 0, e.g. `"240"` | minutes between collections | the entry's `interval`, else the global one |
+| `s3-exporter/collect` | `"true"` or `"false"` | `false`: probed only, never listed | the entry's `collect`, else `true` |
+| `s3-exporter/endpoint-url` | a URL, e.g. `https://grid-2.example:8082` | the S3 endpoint | the entry's `endpoint_url`, else `AWS_ENDPOINT_URL` |
+| `s3-exporter/region` | e.g. `eu-west-1` | the S3 region | the entry's `region`, else `AWS_DEFAULT_REGION` |
+| `s3-exporter/source` | `auto`, `storagegrid`, `minio`, `cloudwatch`, `r2`, `list` | the usage source | the entry's `source`, else the global one |
+| `s3-exporter/bucket-name` | a bucket name | the bucket, when the Secret does not hold it | read from the Secret, under `bucket-field` |
+| `s3-exporter/access-key-field` | a key of the Secret, e.g. `ak` | where the access key is | `secret_keys.access_key` |
+| `s3-exporter/secret-key-field` | a key of the Secret | where the secret key is | `secret_keys.secret_key` |
+| `s3-exporter/bucket-field` | a key of the Secret | where the bucket name is | `secret_keys.bucket` |
+
+`bucket-name` gives the name itself; `bucket-field` says which key of the
+Secret holds it. The three `*-field` annotations are the Secret's own
+`secret_keys`: one laid out differently from its neighbours says so itself.
+
+The key names are thus looked up at three levels, the most precise winning --
+for a named entry, the first two only:
+
+1. the global `secret_keys`;
+2. the entry's `secret_keys` (`secret` or `selector` entry), merged over the
+   global one: naming one field keeps the other two;
+3. for a discovered Secret, its `*-field` annotations.
+
+Changing an annotation changes the bucket's entry: that bucket is watched
+afresh, a new detection and a new collection, as for an entry changed in
+`collector.yml`.
+
+`s3-exporter` is the default **prefix**, set by `annotation_prefix`. The prefix
+is the part before the `/` of an annotation's name: a DNS subdomain such as
+`s3-exporter.example.com` -- giving `s3-exporter.example.com/interval` --, never
+a selector or anything holding `/` or `=`; the exporter refuses to start on one.
+Keep away from `kubernetes.io` and `k8s.io`, reserved for Kubernetes itself. The
+prefix of the annotations and the label of the selector are unrelated: the
+selector can be `example.com/s3-scrape=true` while the annotations stay under
+`s3-exporter/`.
+
+Annotations under other prefixes are ignored. An unknown one under the
+exporter's prefix is an error -- a typo such as `s3-exporter/intervall` must not
+go unnoticed.
+
+```yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: reports-s3
+  namespace: app-b
+  labels: { s3-exporter/watch: "true" }
+  annotations:
+    s3-exporter/interval: "240"
+    s3-exporter/access-key-field: ak
+    s3-exporter/secret-key-field: sk
+data: { ak: …, sk: …, S3_BUCKET: … }
+```
+
+An annotation that cannot be honoured -- an unknown name under the prefix, an
+`interval` that is not a number, an empty value -- does not stop the exporter: the application
+teams own those Secrets, not whoever writes `collector.yml`. That one bucket
+shows as `webtech_s3_bucket_configured 0`, the reason in its log line, until the
+annotation is fixed.
+
 ### Validation and `--check-config`
 
 What only a human can fix stops the start (exit 1, so the pod lands in
 CrashLoopBackOff): `buckets` that is not a non-empty list, an entry with both or
-neither of `secret` and `env_prefix`, an unknown key (a typo in one of a hundred
-entries must not go unnoticed), an invalid Secret or namespace name, the same
-bucket listed twice, `secret` mode outside a cluster, no region.
+more than one of `secret`, `env_prefix` and `selector`, an unknown key (a typo
+in one of a hundred entries must not go unnoticed), an invalid Secret or
+namespace name, the same bucket or selector listed twice, a selector without
+`namespace` or with `name`, `secret` or `selector` outside a cluster, no region.
 
 What can fix itself does not stop the start: a Secret that does not exist yet, a
 RoleBinding still to be applied, a missing key in a Secret. That bucket shows as
@@ -221,16 +345,19 @@ webtech_s3_bucket_configured == 0
 Without `buckets:`, a bucket that cannot be watched still stops the start, as it
 always has.
 
-`--check-config` resolves every bucket's credentials once, reports, and exits
-with 0 when all of them resolve, 1 otherwise. Run it to find the missing Secret,
-key or RoleBinding before going live:
+`--check-config` lists every selector, resolves every bucket's credentials once,
+reports, and exits with 0 when all of them resolve, 1 otherwise. Run it to find
+the missing Secret, key or RoleBinding before going live:
 
 ```console
 $ oc exec deploy/s3-exporter -- exporter --check-config
+OK    selector 's3-exporter/watch=true' in app-e: 1 secret(s)
+FAIL  selector 's3-exporter/watch=true' in app-f: listing secrets in app-f is forbidden (missing Role/RoleBinding for `list` on secrets?)
 OK    secret app-a/app-a-s3: bucket uploads-a, namespace app-a, region us-east-1, endpoint https://grid.example:8082
 FAIL  reading secret app-b/app-b-s3 is forbidden (missing Role/RoleBinding for `get` on this secret?)
 FAIL  secret app-d/partial: S3_SECRET is missing or empty
-1 of 3 bucket(s) resolved
+OK    secret app-e/reports-s3: bucket reports-e, namespace app-e, region us-east-1, endpoint https://grid.example:8082
+2 selector(s), 4 bucket(s), 3 failure(s)
 ```
 
 ### Reloading the configuration
@@ -247,7 +374,8 @@ list is applied as a difference, without a restart:
   the `interval` of a very large bucket therefore lists it again;
 - **every other bucket** is left alone, figures and series included.
 
-Only `buckets:` and `secret_keys:` reload. Every other setting --
+Only `buckets:`, `secret_keys:`, `annotation_prefix:` and
+`discovery_interval:` reload; a selector added is listed at once. Every other setting --
 `interval`, `connectivity_interval`, `probe_timeout`,
 `max_concurrent_collections`, `sources`, … -- and switching between a single
 bucket and a list need a restart: a change to one of them is logged as a
@@ -296,6 +424,7 @@ schemas:
 | --- | --- |
 | `serviceaccount.yaml` | the exporter's identity; no right in its own namespace |
 | `rbac-app-namespace.yaml` | per application namespace: a Role with `get` on the Secrets it names (`resourceNames`), and a RoleBinding to the exporter's ServiceAccount, across namespaces |
+| `rbac-app-namespace-discovery.yaml` | the same, for a namespace whose Secrets are found by label: `list` on all its Secrets |
 | `configmap.yaml` | `collector.yml` with the bucket list and the Secrets' key names |
 | `deployment.yaml` | one replica, the ConfigMap mounted as a directory, probes, resources, a read-only root filesystem |
 | `service.yaml`, `servicemonitor.yaml` | scraped by user-workload monitoring |
@@ -306,7 +435,9 @@ What matters, in order:
 
 1. **One Role and RoleBinding per application namespace**, listing that
    namespace's Secrets in `resourceNames`. `get` only: `list` or `watch` would
-   hand out every Secret there. Never a ClusterRole on Secrets.
+   hand out every Secret there -- unless that namespace's Secrets are
+   [discovered by label](#discovering-secrets-by-label), a choice to make
+   knowingly. Never a ClusterRole on Secrets.
 2. **The ConfigMap mounted as a directory**, never with `subPath`, or changes to
    the list need a restart (see
    [Reloading the configuration](#reloading-the-configuration)).
@@ -374,6 +505,10 @@ used to land in `exported_namespace`.
 | `webtech_s3_config_last_reload_successful` | 0 when the last content of `collector.yml` was rejected and the previous one kept |
 | `webtech_s3_config_last_reload_success_timestamp_seconds` | when the configuration in force was applied |
 | `webtech_s3_config_restart_required` | 1 when a setting that only a restart applies changed in `collector.yml` |
+| `webtech_s3_discovery_up{bucket_namespace, selector}` | 1 when the last list of the selector's Secrets succeeded |
+| `webtech_s3_discovery_secrets{bucket_namespace, selector}` | Secrets the last successful list found |
+| `webtech_s3_discovery_last_success_timestamp_seconds{bucket_namespace, selector}` | when the selector's Secrets were last listed |
+| `webtech_s3_discovery_failures_total{bucket_namespace, selector, reason}` | lists that failed: `forbidden`, `invalid` (the selector), `unavailable` |
 
 A probe-only bucket (`collect: false`) has no size, count or collection
 metrics.
@@ -720,6 +855,13 @@ groups:
         annotations:
           summary: "collector.yml was rejected, the previous configuration is in force"
 
+      # A selector whose Secrets cannot be listed: new ones are not picked up.
+      - alert: S3DiscoveryFailing
+        expr: webtech_s3_discovery_up == 0
+        for: 15m
+        annotations:
+          summary: "{{ $labels.bucket_namespace }}: Secrets matching {{ $labels.selector }} cannot be listed"
+
       - alert: S3UsageStale
         expr: webtech_s3_usage_stale_seconds > 3600
         for: 10m
@@ -750,10 +892,11 @@ replaces an earlier version.
 
 | Section | Shows |
 | --- | --- |
-| header | buckets watched and not watched, unreachable, endpoints down, collections overdue, configuration rejected or waiting for a restart, the certificate closest to its end |
+| header | buckets watched and not watched, unreachable, endpoints down, selectors failing, collections overdue, configuration rejected or waiting for a restart, the certificate closest to its end |
 | Buckets | one row per bucket, unreachable first: probe latency, errors and main error of the last hour, staleness, size, collection, interval in force, endpoint; and the buckets whose credentials cannot be read |
 | Problems | only what needs looking at: reachability of the buckets that failed in the range, the ten slowest probes, errors by reason, the largest buckets, the slowest collections |
 | Endpoints | per endpoint: up, DNS, TCP and TLS times, days left on the certificate, failures and where; the phases over time |
+| Discovery | per selector: up, Secrets found, age of the last list, failures and the main reason |
 | Exporters | per pod: buckets, collections running and overdue, configuration state, CPU, memory, throttling |
 | Logs | the exporters' events from Loki |
 
@@ -855,13 +998,16 @@ exporter-multi                --S3---> both
                               --API--> kube-api (Secrets, Roles, the ServiceAccount)
 ```
 
-`exporter-multi` lists 18 buckets over three application namespaces
-(`app-a`, `app-b`, `app-c`): Secrets read through `kube-api` with the key names
-production uses, one bucket over TLS, the 50 000-object one, one probed only,
-two from `envFrom` variables, and one whose Secret does not exist yet. Its
-`collector.yml` is a ConfigMap volume and reloads. `kube-api` is a small fake of
-the API server: Bearer token checked (401), a Role per Secret (403 without
-one), 404 for a missing Secret. Its state lives in `kube/state` (never
+`exporter-multi` watches 18 buckets over three application namespaces
+(`app-a`, `app-b`, `app-c`), with the key names production uses: Secrets named
+in the configuration and read through `kube-api` in `app-a` and `app-c`, those
+of `app-b` found by the label `s3-exporter/watch=true` -- one probed only by
+annotation, one laid out with its own key names --, one bucket over TLS, the
+50 000-object one, two from `envFrom` variables, and one whose Secret does not
+exist yet. Its `collector.yml` is a ConfigMap volume and reloads. `kube-api` is
+a small fake of the API server: Bearer token checked (401), a Role per Secret
+for `get` and per namespace for `list` (403 without one), 404 for a missing
+Secret, label selectors parsed as the API server does (400 when they do not). Its state lives in `kube/state` (never
 committed), rebuilt by `make obs/kube/reset`.
 
 `exporter-tls` reaches the same storage over TLS, trusting a demo CA through
@@ -903,6 +1049,11 @@ The fake cluster, cleared by `make obs/kube/reset` (`NAME` is
 | `obs/kube/config-add` | adds a bucket to the ConfigMap |
 | `obs/kube/config-remove` | removes one |
 | `obs/kube/config-broken` | publishes invalid YAML: rejected, the previous list kept |
+| `obs/kube/label [NAME=…]` | labels a Secret of `app-b` (default `app-b-spare-s3`): discovered and watched |
+| `obs/kube/unlabel [NAME=…]` | removes the label: no longer watched |
+| `obs/kube/annotate [NAME=… KEY=interval VALUE=…]` | sets an annotation; an empty `VALUE` removes it, an unknown `KEY` stops that bucket |
+| `obs/kube/forbid-list [NS=app-b]` | drops the Role's `list`: discovery fails, the buckets found stay |
+| `obs/kube/allow-list [NS=app-b]` | grants it again |
 
 Grafana comes provisioned with the [dashboard](#dashboard), fed by every
 exporter of the stack at once. cAdvisor is relabelled so its series join on

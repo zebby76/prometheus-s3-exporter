@@ -1,0 +1,33 @@
+---
+# For an application namespace whose Secrets are found by label (a `selector`
+# entry in collector.yml) rather than named one by one. `list` cannot be
+# restricted by label or by name, and a list carries the values: this Role lets
+# the exporter read EVERY Secret of the namespace. Use it where that is
+# acceptable; elsewhere, name the Secrets (rbac-app-namespace.yaml).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: s3-exporter-discover
+  namespace: app-e
+rules:
+  - apiGroups: [""]
+    resources: [secrets]
+    # list only: the list holds the values, so no get; polled, so no watch.
+    verbs: [list]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: s3-exporter-discover
+  namespace: app-e
+  annotations:
+    # What this file is for, in one namespace only: see the comment above.
+    checkov.io/skip1: CKV2_K8S_5=Discovery by label needs list on the namespace
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: s3-exporter-discover
+subjects:
+  - kind: ServiceAccount
+    name: s3-exporter
+    namespace: s3-exporter

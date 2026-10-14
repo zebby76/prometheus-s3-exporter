@@ -1,0 +1,8 @@
+---
+# super-linter's default, plus what checkov must not scan.
+quiet: true
+# The local stack's fake cluster, written by `make obs/up` and gitignored: it
+# holds the demo storage's throwaway keys. checkov scans the directory tree, so
+# IGNORE_GITIGNORED_FILES does not keep it out.
+skip-path:
+  - test/observability/kube/state

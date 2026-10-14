@@ -3,7 +3,8 @@
 Without `buckets:` in the configuration the exporter watches one bucket, named
 by the environment as it always has. With it, each entry names a Kubernetes
 Secret -- or, as a fallback, an environment prefix -- and the Secret holds the
-bucket name and its credentials.
+bucket name and its credentials. An entry may also name a label selector: the
+Secrets that match it in a namespace are found at run time (see discovery.py).
 
 Everything a human has to fix is checked here, at startup, and stops the
 exporter: a typo in one of a hundred entries must show as a CrashLoopBackOff,
@@ -14,8 +15,9 @@ surfaces when the credentials are resolved.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import List, Mapping, Optional
+import re
+from dataclasses import dataclass, field
+from typing import List, Mapping, Optional, Tuple
 
 from exporter.credentials import (
     DEFAULT_KEYS,
@@ -28,6 +30,7 @@ from exporter.sources import AUTO, SOURCES
 
 ENTRY_KEYS = (
     "secret",
+    "selector",
     "namespace",
     "env_prefix",
     "name",
@@ -37,6 +40,14 @@ ENTRY_KEYS = (
     "interval",
     "collect",
     "source",
+)
+
+
+# What the Secret's annotations are read under: `<prefix>/interval`.
+DEFAULT_ANNOTATION_PREFIX = "s3-exporter"
+# An annotation prefix is a DNS subdomain, as Kubernetes requires of one.
+_ANNOTATION_PREFIX = re.compile(
+    r"^(?=.{1,253}$)[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$"
 )
 
 
@@ -74,6 +85,39 @@ class BucketSpec:
             self.source,
             self.collect,
         )
+
+
+@dataclass(frozen=True)
+class SelectorRule:
+    """The Secrets of one namespace that match a label selector, and the
+    settings every bucket found that way starts from."""
+
+    namespace: str
+    selector: str
+    keys: Mapping[str, str] = field(hash=False, compare=False)
+    endpoint_url: str = ""
+    region: str = ""
+    interval_minutes: Optional[float] = None
+    source: Optional[str] = None
+    collect: bool = True
+
+    @property
+    def key(self) -> str:
+        return f"selector:{self.namespace}/{self.selector}"
+
+    def where(self) -> Tuple[str, str]:
+        """What is listed: one list call per pair, whatever the defaults."""
+        return (self.namespace, self.selector)
+
+
+@dataclass(frozen=True)
+class BucketPlan:
+    """The bucket entries of a configuration: those it names, and the
+    selectors whose Secrets are found at run time."""
+
+    specs: List[BucketSpec]
+    rules: List[SelectorRule]
+    annotation_prefix: str = DEFAULT_ANNOTATION_PREFIX
 
 
 def multi_bucket(settings: Mapping) -> bool:
@@ -142,13 +186,51 @@ def _source(entry: Mapping, where: str) -> Optional[str]:
     return value.strip().lower()
 
 
+def annotation_prefix(settings: Mapping) -> str:
+    value = settings.get("annotation_prefix", DEFAULT_ANNOTATION_PREFIX)
+    if not isinstance(value, str) or not _ANNOTATION_PREFIX.match(value):
+        raise ConfigError(
+            f"annotation_prefix must be a DNS subdomain, such as "
+            f"{DEFAULT_ANNOTATION_PREFIX!r} or 's3-exporter.example.com', got {value!r}"
+        )
+    return value
+
+
+def _namespaces(entry: Mapping, where: str) -> List[str]:
+    value = entry.get("namespace")
+    if value is None:
+        raise ConfigError(
+            f"{where}: a selector needs `namespace`: the namespace, or a list of "
+            "them, whose Secrets are listed"
+        )
+    names = value if isinstance(value, list) else [value]
+    if not names:
+        raise ConfigError(f"{where}: namespace is an empty list")
+    for name in names:
+        if not valid_namespace(name):
+            raise ConfigError(f"{where}: {name!r} is not a valid namespace")
+    if len(set(names)) != len(names):
+        raise ConfigError(f"{where}: a namespace is listed twice")
+    return list(names)
+
+
 def parse_buckets(
     settings: Mapping,
     environ: Mapping[str, str],
     kube: Optional[InClusterKubernetes],
 ) -> List[BucketSpec]:
-    """The configured buckets, or ConfigError for anything a human must fix."""
+    """The buckets the configuration names, or ConfigError; selectors aside."""
+    return parse_plan(settings, environ, kube).specs
+
+
+def parse_plan(
+    settings: Mapping,
+    environ: Mapping[str, str],
+    kube: Optional[InClusterKubernetes],
+) -> BucketPlan:
+    """The configured entries, or ConfigError for anything a human must fix."""
     keys = _secret_keys(settings.get("secret_keys"), "secret_keys", DEFAULT_KEYS)
+    prefix_setting = annotation_prefix(settings)
 
     entries = settings.get("buckets")
     if not isinstance(entries, list):
@@ -160,6 +242,7 @@ def parse_buckets(
     default_region = environ.get("AWS_DEFAULT_REGION", "")
 
     specs = []
+    rules = []
     seen = set()
     for index, entry in enumerate(entries, start=1):
         where = f"buckets[{index}]"
@@ -175,18 +258,53 @@ def parse_buckets(
 
         secret = entry.get("secret")
         prefix = entry.get("env_prefix")
-        if (secret is None) == (prefix is None):
-            raise ConfigError(f"{where}: set exactly one of `secret` or `env_prefix`")
+        selector = entry.get("selector")
+        if sum(value is not None for value in (secret, prefix, selector)) != 1:
+            raise ConfigError(
+                f"{where}: set exactly one of `secret`, `env_prefix` or `selector`"
+            )
 
         entry_keys = _secret_keys(entry.get("secret_keys"), where, keys)
-        name = _optional_text(entry, "name", where)
-        namespace = _optional_text(entry, "namespace", where)
         endpoint_url = _optional_text(entry, "endpoint_url", where) or default_endpoint
         region = _optional_text(entry, "region", where) or default_region
         if not region:
             raise ConfigError(
                 f"{where}: no region (set `region` or AWS_DEFAULT_REGION)"
             )
+
+        if selector is not None:
+            if kube is None:
+                raise ConfigError(
+                    f"{where}: `selector` needs the Kubernetes API, and this process "
+                    "does not run in a pod (no ServiceAccount token)"
+                )
+            if not isinstance(selector, str) or not selector.strip():
+                raise ConfigError(f"{where}: selector must be a non-empty string")
+            if "name" in entry:
+                raise ConfigError(
+                    f"{where}: `name` cannot go with a selector, which finds several "
+                    f"buckets; annotate a Secret with {prefix_setting}/bucket-name "
+                    "instead"
+                )
+            for namespace in _namespaces(entry, where):
+                rule = SelectorRule(
+                    namespace=namespace,
+                    selector=selector.strip(),
+                    keys=entry_keys,
+                    endpoint_url=endpoint_url,
+                    region=region,
+                    interval_minutes=_interval(entry, where),
+                    source=_source(entry, where),
+                    collect=_collect(entry, where),
+                )
+                if rule.key in seen:
+                    raise ConfigError(f"{where}: {rule.key} is listed twice")
+                seen.add(rule.key)
+                rules.append(rule)
+            continue
+
+        name = _optional_text(entry, "name", where)
+        namespace = _optional_text(entry, "namespace", where)
 
         source: CredentialSource
         if secret is not None:
@@ -237,7 +355,7 @@ def parse_buckets(
                 collect=_collect(entry, where),
             )
         )
-    return specs
+    return BucketPlan(specs, rules, prefix_setting)
 
 
 def single_bucket_spec(environ: Mapping[str, str]) -> BucketSpec:

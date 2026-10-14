@@ -303,15 +303,18 @@ def test_no_mountinfo_means_no_warning(tmp_path):
 # --- what a new content does -----------------------------------------------------
 
 
-class FleetStub:
+class DiscovererStub:
+    """Takes the bucket entries a reload hands over, as the Discoverer does."""
+
     def __init__(self):
         self.applied = []
+        self.interval_seconds = 60
 
-    def apply(self, specs):
+    def set_plan(self, plan):
         from exporter.fleet import FleetChange
 
-        self.applied.append(specs)
-        return FleetChange(added=list(specs))
+        self.applied.append(plan)
+        return FleetChange(added=list(plan))
 
 
 MULTI = b"""
@@ -325,9 +328,9 @@ configuration:
 def applier(running_content=MULTI):
     from exporter import configuration_applier, parse_configuration
 
-    fleet = FleetStub()
+    fleet = DiscovererStub()
     running = parse_configuration(running_content)
-    return configuration_applier(running, fleet, specs_of=lambda s: s["buckets"]), fleet
+    return configuration_applier(running, fleet, plan_of=lambda s: s["buckets"]), fleet
 
 
 def test_a_new_bucket_list_is_applied():
@@ -367,7 +370,7 @@ def test_entering_the_list_mode_needs_a_restart():
 def test_an_invalid_entry_rejects_the_whole_file():
     from exporter import configuration_applier, parse_configuration
 
-    fleet = FleetStub()
+    fleet = DiscovererStub()
     apply = configuration_applier(parse_configuration(MULTI), fleet)
 
     with pytest.raises(ConfigError, match="unknown key"):

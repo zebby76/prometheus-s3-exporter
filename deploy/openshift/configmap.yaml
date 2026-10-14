@@ -27,3 +27,7 @@ data:
           - { secret: app-b-s3, namespace: app-b }
           # Too large to list: probed only.
           - { secret: app-c-s3, namespace: app-c, collect: false }
+          # Every Secret labelled s3-exporter/watch=true in app-e: needs `list`
+          # there (rbac-app-namespace-discovery.yaml). A Secret's annotations
+          # override these settings: s3-exporter/interval, .../collect, ...
+          - { selector: "s3-exporter/watch=true", namespace: app-e }

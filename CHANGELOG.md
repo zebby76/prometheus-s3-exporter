@@ -20,6 +20,10 @@ notes.
 
 ## [Unreleased]
 
+Nothing pending.
+
+## [6.0.0]
+
 One exporter for a list of buckets: credentials from Kubernetes Secrets, a probe per bucket,
 sizes in the background, every endpoint checked from DNS to TLS, the list reloaded without a
 restart.
@@ -93,7 +97,8 @@ ConfigMap, the new exporter next to the old ones until the dashboard shows the s
   configuration file mounted on its own (Kubernetes `subPath`) is warned about at startup:
   Kubernetes never updates it.
 - `deploy/openshift/`: example manifests -- ServiceAccount, a Role and RoleBinding per application
-  namespace, the ConfigMap, the Deployment, a Service with a ServiceMonitor or a PodMonitor.
+  namespace, the ConfigMap, the Deployment, a Service with a ServiceMonitor or a PodMonitor, a
+  NetworkPolicy.
 - The dashboard, rebuilt for many buckets in one exporter as much as one bucket per exporter: a
   header of what needs attention, the buckets keyed by `(bucket_namespace, name)` with the
   unreachable first, the buckets not watched, only the problems among a hundred, the endpoints,

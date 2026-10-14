@@ -187,6 +187,9 @@ class BucketMonitor:
         self.needs_refresh = False
         self.on_refresh_request: Optional[Callable[[], None]] = None
         self._last_refresh: Optional[float] = None
+        # Set when a reload removed or replaced this bucket: nothing starts
+        # again, and a collection that was running is not published.
+        self.stopped = False
 
     # -- state ----------------------------------------------------------------
 
@@ -199,12 +202,19 @@ class BucketMonitor:
         return self.credentials.bucket if self.credentials else None
 
     def collectable(self) -> bool:
-        return self.configured and self.spec.collect and self.next_due is not None
+        return (
+            not self.stopped
+            and self.configured
+            and self.spec.collect
+            and self.next_due is not None
+        )
 
     # -- credentials ----------------------------------------------------------
 
     def refresh_credentials(self):
         """Read the credentials again and act on any change. Never raises."""
+        if self.stopped:
+            return
         self._last_refresh = self._clock()
         try:
             credentials = self.spec.credentials.resolve()
@@ -216,6 +226,9 @@ class BucketMonitor:
             return
 
         with self._lock:
+            if self.stopped:
+                # Removed by a reload while the Secret was being read.
+                return
             self.needs_refresh = False
             if self.credentials is None:
                 self._start(credentials)
@@ -405,6 +418,7 @@ class BucketMonitor:
 
     def stop(self):
         with self._lock:
+            self.stopped = True
             self._stop_probe()
 
     # -- collection -------------------------------------------------------------
@@ -421,9 +435,9 @@ class BucketMonitor:
         succeeded = collect_once(source, view, bucket, on_error=self._on_s3_error)
 
         with self._lock:
-            if view is not self.view:
-                # The Secret was repointed while this ran: these figures
-                # belong to a bucket no longer watched.
+            if self.stopped or view is not self.view:
+                # Removed by a reload, or the Secret was repointed, while this
+                # ran: these figures belong to a bucket no longer watched.
                 return
             self.selector.record(succeeded)
             if succeeded:
@@ -489,13 +503,21 @@ class ExporterCollector:
     """Every watched bucket's metrics, one family per metric, plus the exporter's."""
 
     def __init__(
-        self, monitors: List[BucketMonitor], scheduler, version: str, endpoints=None
+        self,
+        monitors,
+        scheduler,
+        version: str,
+        endpoints=None,
+        config=None,
     ):
+        # A list, or the Fleet a reload changes: iterated afresh every scrape.
         self.monitors = monitors
         self.scheduler = scheduler
         self.version = version
         # The EndpointRegistry, or None when the probes are off.
         self.endpoints = endpoints
+        # The ConfigReloader, for its own metrics; None in tests.
+        self.config = config
 
     def collect(self):
         rows = []
@@ -506,7 +528,9 @@ class ExporterCollector:
         )
         succeeded = True
         configured = 0
-        for monitor in self.monitors:
+        # Once, so a reload in the middle of a scrape cannot skew the counts.
+        monitors = list(self.monitors)
+        for monitor in monitors:
             try:
                 rows += monitor.rows()
             except Exception as exc:
@@ -525,6 +549,8 @@ class ExporterCollector:
                     },
                 )
 
+        if self.config is not None:
+            rows += self.config.rows()
         if self.endpoints is not None:
             try:
                 rows += self.endpoints.rows()
@@ -534,7 +560,7 @@ class ExporterCollector:
 
         for state, count in (
             ("configured", configured),
-            ("unconfigured", len(self.monitors) - configured),
+            ("unconfigured", len(monitors) - configured),
         ):
             rows.append(
                 [

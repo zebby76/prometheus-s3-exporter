@@ -363,3 +363,35 @@ def test_a_probe_only_bucket_shows_no_collection_figures():
     assert "bucket_size_bytes" not in names
     assert "collect_interval_seconds" not in names
     assert "bucket_configured" in names
+
+
+# --- removed by a reload ---------------------------------------------------------
+
+
+def test_a_stopped_bucket_is_no_longer_collected_nor_started():
+    watched = monitor(Credentials(unavailable(), A))
+    watched.refresh_credentials()
+
+    watched.stop()
+    watched.refresh_credentials()
+
+    assert not watched.configured  # a Secret readable now starts nothing
+    assert not watched.collectable()
+
+
+def test_a_collection_that_ends_after_the_stop_is_not_published(perf):
+    clock = Clock()
+    watched = started(clock)
+    due = watched.next_due
+
+    class StoppedMidway(Source):
+        def fetch(self):
+            watched.stop()
+            return super().fetch()
+
+    watched.selector.source = StoppedMidway(perf)
+    watched.collect()
+
+    # Not rescheduled: the scheduler never runs a removed bucket again.
+    assert watched.next_due == due
+    assert not watched.collectable()

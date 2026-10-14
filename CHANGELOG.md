@@ -38,6 +38,9 @@ Draft, completed as 6.0.0 takes shape.
   `webtech_s3_collect_interval_seconds` reports the interval in force.
 - `webtech_s3_exporter_info` has one series per watched bucket, labelled `bucket_namespace` and
   `name`, and an `endpoint` label.
+- **Mount the configuration ConfigMap as a directory** (`mountPath: /app/config`), not with
+  `subPath`, for its changes to be applied without a restart: Kubernetes never updates a
+  `subPath` mount. `SIGHUP` now reloads the configuration instead of stopping the exporter.
 - **`webtech_s3_bucket_dns_duration_seconds{name}` and `webtech_s3_bucket_dns_failures_total{name}`
   are gone** (added in 5.1.0): the DNS is checked per endpoint, in
   `webtech_s3_endpoint_dns_duration_seconds{endpoint}` and
@@ -73,6 +76,14 @@ Draft, completed as 6.0.0 takes shape.
   `_tls_cert_expiry_timestamp_seconds`. A failure is logged with its phase; a certificate less
   than 14 days from its end is warned about once a day. `/readyz` shows the endpoints, without
   counting them.
+- `collector.yml` is read again every `config_reload_interval` seconds (60) and on `SIGHUP`. A
+  changed bucket list is applied as a difference: buckets added are watched, buckets removed
+  stop, an entry that changed is watched afresh, the others keep their figures and series. Only
+  `buckets` and `secret_keys` reload; a change to any other setting is logged and raises
+  `webtech_s3_config_restart_required`. A content that cannot be honoured is rejected, the
+  configuration in force kept, and `webtech_s3_config_last_reload_successful` drops to 0. A
+  configuration file mounted on its own (Kubernetes `subPath`) is warned about at startup:
+  Kubernetes never updates it.
 - `test/observability`: an exporter over TLS, with a demo CA made by `make obs/up`, and
   `make obs/chaos/tls-wrong-name`, `tls-expired` and `tls-expiring`.
 

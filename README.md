@@ -233,6 +233,60 @@ FAIL  secret app-d/partial: S3_SECRET is missing or empty
 1 of 3 bucket(s) resolved
 ```
 
+### Reloading the configuration
+
+`collector.yml` is read again every `config_reload_interval` seconds (60; 0
+turns the period off) and on `SIGHUP`. When its content changed, the bucket
+list is applied as a difference, without a restart:
+
+- **a bucket added** is watched, its first probe and collection spread over the
+  first minutes as at startup;
+- **a bucket removed** stops: its probe ends and its series disappear;
+- **a bucket whose entry changed** -- any key, including a `secret_keys` it
+  inherits -- is watched afresh: a new detection and a new collection. Changing
+  the `interval` of a very large bucket therefore lists it again;
+- **every other bucket** is left alone, figures and series included.
+
+Only `buckets:` and `secret_keys:` reload. Every other setting --
+`interval`, `connectivity_interval`, `probe_timeout`,
+`max_concurrent_collections`, `sources`, … -- and switching between a single
+bucket and a list need a restart: a change to one of them is logged as a
+warning, raises `webtech_s3_config_restart_required` to 1, and is not applied.
+The environment (`AWS_*`, `COLLECTOR_*`) is read at startup only.
+
+**A content that cannot be honoured keeps the configuration in force**: invalid
+YAML, an unknown key, an entry listed twice -- anything that would stop the
+exporter at startup. The error is logged once, and
+`webtech_s3_config_last_reload_successful` drops to 0 until the file is fixed
+or put back as it was:
+
+```promql
+webtech_s3_config_last_reload_successful == 0
+```
+
+**Mount the ConfigMap as a directory, not with `subPath`.** The kubelet updates
+a ConfigMap volume by swapping a link in its directory, about a minute after the
+change; a file mounted with `subPath` is copied once when the pod starts and
+**never** updated. The image keeps nothing else in `/app/config`, so the whole
+directory can take the ConfigMap (its key must be `collector.yml`):
+
+```yaml
+# Never updated: changes need a restart
+volumeMounts:
+  - name: config
+    mountPath: /app/config/collector.yml
+    subPath: collector.yml
+
+# Updated within about two minutes: the kubelet's delay, then the reload period
+volumeMounts:
+  - name: config
+    mountPath: /app/config
+```
+
+The exporter warns at startup when its configuration file is mounted on its own.
+Mounting the ConfigMap elsewhere works too, with `COLLECTOR_CONFIG` pointing at
+the file.
+
 ## Metrics
 
 Every bucket's metrics are labelled `{bucket_namespace, name}`: the namespace of
@@ -261,6 +315,9 @@ used to land in `exported_namespace`.
 | `webtech_s3_collections_running` | collections in progress |
 | `webtech_s3_collections_overdue` | collections late with no worker free: raise `max_concurrent_collections` or the CPU limit |
 | `webtech_s3_exporter_up` | 1 when the exporter is answering |
+| `webtech_s3_config_last_reload_successful` | 0 when the last content of `collector.yml` was rejected and the previous one kept |
+| `webtech_s3_config_last_reload_success_timestamp_seconds` | when the configuration in force was applied |
+| `webtech_s3_config_restart_required` | 1 when a setting that only a restart applies changed in `collector.yml` |
 
 A probe-only bucket (`collect: false`) has no size, count or collection
 metrics.
@@ -599,6 +656,13 @@ groups:
         for: 10m
         annotations:
           summary: "{{ $labels.name }}: the connectivity probe stopped running"
+
+      # A collector.yml change that was rejected: the previous one is in force.
+      - alert: S3ConfigRejected
+        expr: webtech_s3_config_last_reload_successful == 0
+        for: 5m
+        annotations:
+          summary: "collector.yml was rejected, the previous configuration is in force"
 
       - alert: S3UsageStale
         expr: webtech_s3_usage_stale_seconds > 3600

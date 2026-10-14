@@ -63,6 +63,14 @@ configuration:
   # for a full hour.
   - retry_interval: 300
 
+  # Seconds between two reads of this file. A changed `buckets` list (or
+  # `secret_keys`) is applied without a restart: only the buckets that changed
+  # move. Other settings need a restart. A content that cannot be honoured is
+  # rejected and the configuration in force kept. 0 reads it on SIGHUP only.
+  # Mount the ConfigMap as a directory: with subPath, Kubernetes never updates
+  # the file. See "Reloading the configuration" in README.md.
+  - config_reload_interval: 60
+
   # Per-source settings. minio and cloudwatch stay inactive until configured,
   # because both need credentials beyond the S3 key pair the exporter uses.
   - sources:

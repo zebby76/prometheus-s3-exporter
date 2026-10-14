@@ -61,6 +61,20 @@ class BucketSpec:
     # False: probe the bucket, never list it -- for one too large to list.
     collect: bool = True
 
+    def fingerprint(self) -> tuple:
+        """Every setting of the entry: two specs with the same one watch the
+        same bucket the same way, and a reload leaves that bucket alone."""
+        return (
+            self.key,
+            self.credentials.identity(),
+            self.label_namespace,
+            self.endpoint_url,
+            self.region,
+            self.interval_minutes,
+            self.source,
+            self.collect,
+        )
+
 
 def multi_bucket(settings: Mapping) -> bool:
     """True when the configuration lists buckets.

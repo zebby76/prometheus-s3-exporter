@@ -57,6 +57,23 @@ class CredentialSource(ABC):
     def describe(self) -> str:
         """Where the credentials come from, for logs and reports."""
 
+    def identity(self) -> tuple:
+        """Everything that decides what is read: equal means the same source.
+
+        Names only, never a value: a reload compares these to tell an entry
+        that changed from one that did not.
+        """
+        return (
+            type(self).__name__,
+            self._where(),
+            tuple(sorted(self.keys.items())),
+            self.bucket_name,
+        )
+
+    @abstractmethod
+    def _where(self) -> tuple:
+        """The Secret or the prefix the values are read from."""
+
     @abstractmethod
     def _values(self) -> Mapping[str, str]:
         """Every value available, by the name it is looked up with."""
@@ -105,6 +122,9 @@ class EnvCredentials(CredentialSource):
     def describe(self) -> str:
         return f"environment {self.prefix}*" if self.prefix else "environment"
 
+    def _where(self) -> tuple:
+        return (self.prefix,)
+
     def _values(self) -> Mapping[str, str]:
         return self._environ
 
@@ -130,6 +150,9 @@ class KubernetesSecretCredentials(CredentialSource):
 
     def describe(self) -> str:
         return f"secret {self.namespace}/{self.secret}"
+
+    def _where(self) -> tuple:
+        return (self.namespace, self.secret)
 
     def _values(self) -> Mapping[str, str]:
         try:

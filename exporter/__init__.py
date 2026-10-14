@@ -24,8 +24,15 @@ from exporter.clients import (  # noqa: F401 -- re-exported
     probe_client_for,
     probe_timeout_for,
 )
+from exporter.config import (
+    DEFAULT_CONFIG_RELOAD_SECONDS,
+    ConfigReloader,
+    looks_mounted_with_subpath,
+    restart_keys,
+)
 from exporter.credentials import CredentialsUnavailable
 from exporter.endpoints import EndpointRegistry
+from exporter.fleet import Fleet
 from exporter.handler import (
     DEFAULT_PROXY_HEADERS,
     exporter,
@@ -121,6 +128,29 @@ def load_configuration(path=CONFIG_PATH):
     deployment that forgets to mount it should still start rather than die on a
     FileNotFoundError.
     """
+    try:
+        with open(path, "rb") as ymlfile:
+            content = ymlfile.read()
+    except FileNotFoundError:
+        logging.info("No configuration at %s, using defaults", path)
+        content = b""
+    except OSError as e:
+        logging.error("Cannot read configuration %s: %s", path, e)
+        content = b""
+    try:
+        return parse_configuration(content)
+    except ConfigError as e:
+        logging.error("Cannot read configuration %s: %s", path, e)
+        return parse_configuration(b"")
+
+
+def parse_configuration(content: bytes) -> dict:
+    """The settings a collector.yml content gives, defaults and overrides applied.
+
+    Strict: raises ConfigError on a file that is not YAML or not shaped like a
+    configuration. A reload must never mistake a broken file for an empty one
+    and drop every bucket.
+    """
     settings = {
         "interval": DEFAULT_INTERVAL_MINUTES,
         "source": sources.AUTO,
@@ -133,21 +163,23 @@ def load_configuration(path=CONFIG_PATH):
         "proxy_headers": dict(DEFAULT_PROXY_HEADERS),
         "max_concurrent_collections": DEFAULT_MAX_CONCURRENT_COLLECTIONS,
         "credentials_refresh": DEFAULT_CREDENTIALS_REFRESH_SECONDS,
+        "config_reload_interval": DEFAULT_CONFIG_RELOAD_SECONDS,
     }
     configured = set()
 
-    document = {}
     try:
-        with open(path, "r", encoding="utf-8") as ymlfile:
-            document = yaml.load(ymlfile, Loader=yaml.SafeLoader) or {}
-    except FileNotFoundError:
-        logging.info("No configuration at %s, using defaults", path)
-    except (OSError, yaml.YAMLError) as e:
-        logging.error("Cannot read configuration %s: %s", path, e)
+        document = yaml.load(content, Loader=yaml.SafeLoader) or {}
+    except yaml.YAMLError as e:
+        raise ConfigError(f"not valid YAML: {e}") from None
+    if not isinstance(document, dict):
+        raise ConfigError("the document must be a mapping")
+    entries = document.get("configuration") or []
+    if not isinstance(entries, list):
+        raise ConfigError("`configuration` must be a list")
 
     # `configuration` is a list of mappings; merging them keeps the historical
     # one-key-per-entry layout working alongside a single grouped mapping.
-    for entry in document.get("configuration") or []:
+    for entry in entries:
         if isinstance(entry, dict):
             settings.update(entry)
             configured.update(entry)
@@ -188,6 +220,35 @@ def load_configuration(path=CONFIG_PATH):
         settings["sources"] = {}
 
     return settings
+
+
+# What a reload applies; every other setting needs a restart. Both decide the
+# bucket entries: the list, and the key names every entry inherits.
+RELOADABLE_SETTINGS = frozenset({"buckets", "secret_keys"})
+
+
+def configuration_applier(running: dict, fleet, specs_of=None):
+    """What the reloader calls with a new collector.yml content.
+
+    Raises ConfigError to reject it; returns the settings that changed but
+    only a restart applies. The bucket list is applied as a difference.
+    """
+    specs_of = specs_of or bucket_specs
+    multi = multi_bucket(running)
+
+    def apply(content: bytes) -> List[str]:
+        read = parse_configuration(content)
+        pending = restart_keys(running, read, RELOADABLE_SETTINGS)
+        if multi_bucket(read) != multi:
+            # The mode decides how the exporter was wired: nothing to diff.
+            return sorted(set(pending) | {"buckets"})
+        if multi:
+            # Validated in full first: one bad entry rejects the whole file.
+            change = fleet.apply(specs_of(read))
+            logging.info("Configuration reloaded: %s", change.summary())
+        return pending
+
+    return apply
 
 
 def positive_number(settings, key, unit):
@@ -344,14 +405,18 @@ def main():
     )
     refresh_seconds = positive_number(settings, "credentials_refresh", "seconds")
 
-    monitors = [BucketMonitor(spec, monitor_settings) for spec in specs]
-    refresher = CredentialsRefresher(monitors, refresh_seconds, STOP)
-    for monitor in monitors:
-        monitor.on_refresh_request = refresher.request
+    refresher = CredentialsRefresher([], refresh_seconds, STOP)
 
+    def make_monitor(spec):
+        monitor = BucketMonitor(spec, monitor_settings)
+        monitor.on_refresh_request = refresher.request
+        return monitor
+
+    monitors = [make_monitor(spec) for spec in specs]
     # A first pass before anything else runs, so every bucket whose Secret is
     # readable starts at once.
-    refresher.refresh_all()
+    for monitor in monitors:
+        monitor.refresh_credentials()
     if not multi and not monitors[0].configured:
         # One bucket and nothing to watch: as before 6.0.0, that stops the start.
         logging.error("Cannot watch the bucket: %s", monitors[0].error)
@@ -371,18 +436,40 @@ def main():
             monitor_settings.probe_timeout,
             spread=len(specs) > 1,
         )
-        endpoints.sync(monitor.endpoint for monitor in monitors)
 
-    scheduler = CollectionScheduler(monitors, max_workers, STOP)
+    fleet = Fleet(monitors, make_monitor, endpoints)
+    if endpoints is not None:
+        endpoints.sync(fleet.endpoints())
+    refresher.monitors = fleet
+
+    scheduler = CollectionScheduler(fleet, max_workers, STOP)
     refresher.on_change = scheduler.wake
-    REGISTRY.register(ExporterCollector(monitors, scheduler, __version__, endpoints))
+    fleet.on_change = scheduler.wake
+
+    reload_seconds = int(settings["config_reload_interval"])
+    reloader = ConfigReloader(
+        CONFIG_PATH, reload_seconds, configuration_applier(settings, fleet), STOP
+    )
+    reloader.started_with_file()
+    signal.signal(signal.SIGHUP, lambda _signum, _frame: reloader.request())
+    if reload_seconds and looks_mounted_with_subpath(CONFIG_PATH):
+        logging.warning(
+            "%s is mounted on its own -- a Kubernetes subPath, or a single-file "
+            "bind mount: a ConfigMap update never reaches it, so changes need a "
+            "restart. Mount the ConfigMap as a directory to have them applied.",
+            CONFIG_PATH,
+        )
+
+    REGISTRY.register(
+        ExporterCollector(fleet, scheduler, __version__, endpoints, reloader)
+    )
 
     set_proxy_headers(settings["proxy_headers"])
     exporter(port=9773)
     health(
         port=9774,
         readiness=(
-            (lambda: {monitor.spec.key: monitor.readiness() for monitor in monitors})
+            (lambda: {monitor.spec.key: monitor.readiness() for monitor in fleet})
             if connectivity_interval
             else None
         ),
@@ -391,6 +478,7 @@ def main():
 
     refresher.start()
     scheduler.start()
+    reloader.start()
 
     # Woken by SIGTERM/SIGINT; the timeout keeps the main thread responsive to
     # signals on every platform.
@@ -400,6 +488,5 @@ def main():
     scheduler.shutdown()
     if endpoints is not None:
         endpoints.stop()
-    for monitor in monitors:
-        monitor.stop()
+    fleet.stop()
     shutdown()

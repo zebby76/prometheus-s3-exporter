@@ -126,6 +126,9 @@ if ! grep -q '^webtech_s3_buckets{state="configured"} 1' <<<"${scrape}"; then
 	exit 1
 fi
 echo "ok: one bucket configured"
+# The configuration the exporter started with is the one in force.
+assert_equals webtech_s3_config_last_reload_successful "$(value_of webtech_s3_config_last_reload_successful)" 1
+assert_equals webtech_s3_config_restart_required "$(value_of webtech_s3_config_restart_required)" 0
 
 # The detected source is published as a label so a fallback stays visible.
 if ! grep -q 'webtech_s3_exporter_info{.*source="' <<<"${scrape}"; then

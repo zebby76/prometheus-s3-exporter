@@ -1,21 +1,13 @@
 import argparse
 import logging
 import os
-import re
 import signal
 import sys
 import threading
-import time
-from collections import OrderedDict
-from dataclasses import dataclass
-from datetime import datetime, timezone
-from typing import List, Optional
+from typing import List
 
-import boto3
 import yaml
-from botocore.config import Config
-from prometheus_client import Info
-from prometheus_client.core import REGISTRY, GaugeMetricFamily
+from prometheus_client.core import REGISTRY
 
 from exporter import sources
 from exporter._version import get_versions
@@ -26,8 +18,13 @@ from exporter.buckets import (
     parse_buckets,
     single_bucket_spec,
 )
+from exporter.clients import (  # noqa: F401 -- re-exported
+    build_probe_client,
+    build_s3_client,
+    probe_client_for,
+    probe_timeout_for,
+)
 from exporter.credentials import CredentialsUnavailable
-from exporter.errors import describe
 from exporter.handler import (
     DEFAULT_PROXY_HEADERS,
     exporter,
@@ -35,36 +32,47 @@ from exporter.handler import (
     set_proxy_headers,
 )
 from exporter.kube import InClusterKubernetes
-from exporter.probe import ConnectivityProbe
-from exporter.selection import DEFAULT_REDETECT_SECONDS, SourceSelector
-from exporter.sources import SourceContext, Usage, UsageSource
-
-from .utils import merge_dicts_ordered
+from exporter.metrics import (  # noqa: F401 -- re-exported
+    BucketSizeCollector,
+    Snapshot,
+    collector_up_gauge,
+    format_label_key,
+    format_label_value,
+    format_metric_name,
+    gauge_generator,
+    group_metrics,
+)
+from exporter.monitor import (  # noqa: F401 -- collect_once re-exported
+    BucketMonitor,
+    ExporterCollector,
+    MonitorSettings,
+    collect_once,
+)
+from exporter.scheduler import CollectionScheduler, CredentialsRefresher
+from exporter.selection import DEFAULT_REDETECT_SECONDS
 
 __version__ = get_versions()["version"]
 
-gauges = {}
-
-metric_invalid_chars = re.compile(r"[^a-zA-Z0-9_:]")
-metric_invalid_start_chars = re.compile(r"^[^a-zA-Z_:]")
-label_invalid_chars = re.compile(r"[^a-zA-Z0-9_]")
-label_invalid_start_chars = re.compile(r"^[^a-zA-Z_]")
-label_start_double_under = re.compile(r"^__+")
 
 CONFIG_PATH = os.getenv("COLLECTOR_CONFIG", "config/collector.yml")
 
 # Minutes between two collections. A bucket size is a capacity figure: few
 # dashboards need it fresher, and the listing source pays for every cycle.
 DEFAULT_INTERVAL_MINUTES = 5
+# With a bucket list, collections are background work: the probe answers
+# reachability every 30 seconds, and a size an hour old is fresh enough.
+DEFAULT_MULTI_BUCKET_INTERVAL_MINUTES = 60
+# Collections running at once. Each worker can hold a listing for a long time;
+# the probes run apart and never wait for one.
+DEFAULT_MAX_CONCURRENT_COLLECTIONS = 2
+# Seconds between two reads of every bucket's Secret: how soon a rotated key or
+# a newly granted RoleBinding is picked up.
+DEFAULT_CREDENTIALS_REFRESH_SECONDS = 300
 # Consecutive fetch failures after which the source is re-detected. Without
 # this, a provider that is briefly unreachable at startup would pin the
 # exporter to the listing fallback until someone restarts the pod.
 DEFAULT_MAX_FAILURES = 3
 
-# Fraction of the interval beyond which a collection is worth a warning. Past
-# this the configured period and the effective one start to diverge, and the
-# listing is the only source whose cost grows with the bucket.
-SLOW_COLLECTION_RATIO = 0.25
 
 # Seconds between reachability probes. The collection interval is sized for the
 # cost of measuring the bucket, which on a large one runs into tens of minutes;
@@ -105,119 +113,6 @@ def signal_handler(signum, _frame):
     STOP.set()
 
 
-def build_s3_client(
-    aws_access_key_id,
-    aws_secret_access_key,
-    aws_default_region,
-    aws_endpoint_url,
-    config=None,
-):
-    """Build the S3 client. Raises so the caller can decide what to do."""
-    return boto3.client(
-        service_name="s3",
-        region_name=aws_default_region or None,
-        endpoint_url=aws_endpoint_url or None,
-        aws_access_key_id=aws_access_key_id,
-        aws_secret_access_key=aws_secret_access_key,
-        config=config,
-    )
-
-
-def probe_timeout_for(configured, interval_seconds):
-    """A whole check has to fit inside the interval it serves.
-
-    Two attempts of connect plus read, so four timeouts: a probe must never
-    still be running when the next one is due.
-    """
-    if not interval_seconds:
-        return int(configured)
-    return max(1, min(int(configured), interval_seconds // 4))
-
-
-def build_probe_client(
-    aws_access_key_id,
-    aws_secret_access_key,
-    aws_default_region,
-    aws_endpoint_url,
-    timeout_seconds,
-):
-    """A client sized for one round trip, not for a long listing.
-
-    The collection client keeps the boto3 defaults, which are right for it: a
-    transient error in the middle of 150 pages should be retried, not fail the
-    hour. A probe wants the opposite.
-    """
-    return build_s3_client(
-        aws_access_key_id,
-        aws_secret_access_key,
-        aws_default_region,
-        aws_endpoint_url,
-        config=Config(
-            connect_timeout=timeout_seconds,
-            read_timeout=timeout_seconds,
-            # No botocore retry at all. Zero and not one, because botocore
-            # counts retries here rather than attempts, so max_attempts=1 would
-            # still permit a second request; this resolves to
-            # total_max_attempts=1.
-            #
-            # The reason is the backoff, not the extra request. Both retry
-            # modes sleep rand(0, 1) seconds before the first retry -- legacy
-            # by way of `"base": "rand"` in _retry.json, and standard the same,
-            # since the cheaper 0.05 scaling in its ExponentialBackoff sits
-            # behind NEW_RETRIES_ENABLED, an internal flag that is off. That
-            # sleep lands inside probe_duration_seconds and is indistinguishable
-            # from real latency. ConnectivityProbe retries once by itself
-            # instead: no sleep, and counted.
-            retries={"max_attempts": 0, "mode": "standard"},
-            # SO_KEEPALIVE on the socket, and nothing more: Linux waits
-            # tcp_keepalive_time -- 7200s out of the box -- before the first
-            # probe packet, so at any sane probe cadence this fires never. It is
-            # set so that lowering that sysctl below the load balancer's idle
-            # timeout takes effect. What keeps the connection warm today is the
-            # probe traffic itself, which is why the interval has to stay under
-            # that timeout -- see DEFAULT_CONNECTIVITY_INTERVAL_SECONDS.
-            tcp_keepalive=True,
-            max_pool_connections=1,
-        ),
-    )
-
-
-def probe_client_for(
-    shared_client,
-    interval_seconds,
-    timeout_seconds,
-    aws_access_key_id,
-    aws_secret_access_key,
-    aws_default_region,
-    aws_endpoint_url,
-):
-    """The probe's own client, or the shared one when there is no probe.
-
-    The probe is auxiliary: a client it cannot build must not stop the exporter
-    from starting, unlike the collection client whose failure is fatal.
-    """
-    if not interval_seconds:
-        return shared_client
-
-    try:
-        client = build_probe_client(
-            aws_access_key_id,
-            aws_secret_access_key,
-            aws_default_region,
-            aws_endpoint_url,
-            timeout_seconds,
-        )
-    except Exception as e:
-        logging.error("Cannot build the probe client, using the shared one: %s", e)
-        return shared_client
-
-    logging.info(
-        "Connectivity probe client: %ss timeout, single attempt, keepalive on",
-        timeout_seconds,
-    )
-    return client
-
-
 def load_configuration(path=CONFIG_PATH):
     """Read collector.yml, falling back to defaults when it is absent.
 
@@ -235,7 +130,10 @@ def load_configuration(path=CONFIG_PATH):
         "redetect_interval": DEFAULT_REDETECT_SECONDS,
         "probe_timeout": DEFAULT_PROBE_TIMEOUT_SECONDS,
         "proxy_headers": dict(DEFAULT_PROXY_HEADERS),
+        "max_concurrent_collections": DEFAULT_MAX_CONCURRENT_COLLECTIONS,
+        "credentials_refresh": DEFAULT_CREDENTIALS_REFRESH_SECONDS,
     }
+    configured = set()
 
     document = {}
     try:
@@ -251,6 +149,11 @@ def load_configuration(path=CONFIG_PATH):
     for entry in document.get("configuration") or []:
         if isinstance(entry, dict):
             settings.update(entry)
+            configured.update(entry)
+
+    # The default depends on the mode; an interval written down always wins.
+    if "interval" not in configured and multi_bucket(settings):
+        settings["interval"] = DEFAULT_MULTI_BUCKET_INTERVAL_MINUTES
 
     env_source = os.getenv("COLLECTOR_SOURCE")
     if env_source:
@@ -284,388 +187,6 @@ def load_configuration(path=CONFIG_PATH):
         settings["sources"] = {}
 
     return settings
-
-
-def format_label_key(label_key):
-    label_key = re.sub(label_invalid_chars, "_", label_key)
-    label_key = re.sub(label_invalid_start_chars, "_", label_key)
-    label_key = re.sub(label_start_double_under, "_", label_key)
-    return label_key
-
-
-def format_label_value(value_list):
-    if isinstance(value_list, list):
-        value_list = [str(v) for v in value_list]
-        return "_".join(value_list)
-    else:
-        return str(value_list)
-
-
-def format_metric_name(name_list):
-    metric = "_".join(name_list)
-    metric = re.sub(metric_invalid_chars, "_", metric)
-    metric = re.sub(metric_invalid_start_chars, "_", metric)
-    return metric.lower()
-
-
-def group_metrics(metrics):
-
-    metric_dict = {}
-    for name_list, label_dict, value, description in metrics:
-        metric_name = format_metric_name(name_list)
-        label_dict = OrderedDict(
-            [
-                (format_label_key(k), format_label_value(v))
-                for k, v in label_dict.items()
-            ]
-        )
-
-        if metric_name not in metric_dict:
-            metric_dict[metric_name] = (
-                tuple(label_dict.keys()),
-                {},
-                {"description": description},
-            )
-
-        label_keys = metric_dict[metric_name][0]
-        label_values = tuple([label_dict[key] for key in label_keys])
-
-        metric_dict[metric_name][1][label_values] = value
-
-    logging.debug("Function [group_metrics] - return : %s", metric_dict)
-    return metric_dict
-
-
-def gauge_generator(metrics):
-    metric_dict = group_metrics(metrics)
-
-    for metric_name, (label_keys, value_dict, description) in metric_dict.items():
-        if label_keys:
-            gauge = GaugeMetricFamily(
-                metric_name, description["description"], labels=label_keys
-            )
-
-            for label_values, value in value_dict.items():
-                gauge.add_metric(label_values, value)
-        else:
-            gauge = GaugeMetricFamily(
-                metric_name,
-                description["description"],
-                value=list(value_dict.values())[0],
-            )
-
-        yield gauge
-
-
-def collector_up_gauge(name_list, description, succeeded=True):
-    metric_name = format_metric_name(name_list + ["up"])
-    return GaugeMetricFamily(metric_name, description, value=int(succeeded))
-
-
-@dataclass(frozen=True)
-class Snapshot:
-    """One consistent view of the bucket, published in a single assignment.
-
-    Size and count used to live in separate module globals, so a scrape landing
-    between two writes could report a size from one cycle and a count from the
-    next. Replacing the whole snapshot at once removes that window.
-    """
-
-    usage: Optional[Usage] = None
-    measured_at: Optional[datetime] = None
-    healthy: bool = False
-    duration_seconds: float = 0.0
-    source_name: str = "none"
-
-    def stale_seconds(self, now: Optional[datetime] = None) -> float:
-        """Age of the figures currently being served.
-
-        Sources that run a background scanner tell us when they computed the
-        numbers; for the others the age is how long ago we collected them. Both
-        keep growing while collection is failing, which is the point.
-        """
-        now = now or datetime.now(timezone.utc)
-        if self.usage is not None and self.usage.as_of is not None:
-            return max(0.0, (now - self.usage.as_of).total_seconds())
-        if self.measured_at is not None:
-            return max(0.0, (now - self.measured_at).total_seconds())
-        return 0.0
-
-
-class BucketSizeCollector(object):
-    def __init__(self, namespace, bucket, interval_seconds=0, probe=None):
-        self.namespace = namespace
-        self.bucket = bucket
-        self.interval_seconds = interval_seconds
-        # Written by the probe thread only, read here: two frozen objects with
-        # one writer each, so neither needs a lock.
-        self.probe = probe
-        self._snapshot = Snapshot()
-
-    @property
-    def snapshot(self) -> Snapshot:
-        return self._snapshot
-
-    def update(self, snapshot: Snapshot):
-        self._snapshot = snapshot
-
-    def collect(self):
-
-        metrics = []
-
-        # Assigned before the try so the except branch can report the failure
-        # instead of raising NameError inside the error handler.
-        collector_metric_name = ["webtech_s3"]
-        up_metric_name = collector_metric_name + ["exporter"]
-        up_metric_description = "1 when the exporter could render its metrics."
-
-        try:
-            # Read once: the collection thread may swap it under us.
-            snapshot = self.snapshot
-            usage = snapshot.usage or Usage(size_bytes=0, object_count=0)
-
-            prometheus_labels = {}
-
-            prometheus_namespace_label = OrderedDict({"namespace": self.namespace})
-            prometheus_name_label = OrderedDict({"name": self.bucket})
-
-            prometheus_labels = merge_dicts_ordered(
-                prometheus_labels, prometheus_namespace_label
-            )
-            prometheus_labels = merge_dicts_ordered(
-                prometheus_labels, prometheus_name_label
-            )
-
-            state_metric_name = collector_metric_name + ["exporter", "status"]
-            state_metric_description = (
-                "1 when the last collection of the bucket usage succeeded."
-            )
-
-            metrics.append(
-                [
-                    state_metric_name,
-                    prometheus_labels,
-                    int(snapshot.healthy),
-                    state_metric_description,
-                ]
-            )
-
-            size_metric_name = collector_metric_name + ["bucket_size_bytes"]
-            size_metric_description = "Size of S3 bucket in bytes."
-
-            metrics.append(
-                [
-                    size_metric_name,
-                    prometheus_labels,
-                    int(usage.size_bytes),
-                    size_metric_description,
-                ]
-            )
-
-            count_metric_name = collector_metric_name + ["bucket_count_total"]
-            count_metric_description = "Object Count of S3 bucket."
-
-            metrics.append(
-                [
-                    count_metric_name,
-                    prometheus_labels,
-                    int(usage.object_count),
-                    count_metric_description,
-                ]
-            )
-
-            stale_metric_name = collector_metric_name + ["usage_stale_seconds"]
-            stale_metric_description = (
-                "Age of the usage figures currently exposed, in seconds."
-            )
-
-            metrics.append(
-                [
-                    stale_metric_name,
-                    prometheus_labels,
-                    snapshot.stale_seconds(),
-                    stale_metric_description,
-                ]
-            )
-
-            duration_metric_name = collector_metric_name + ["collect_duration_seconds"]
-            duration_metric_description = "Duration of the last collection, in seconds."
-
-            metrics.append(
-                [
-                    duration_metric_name,
-                    prometheus_labels,
-                    snapshot.duration_seconds,
-                    duration_metric_description,
-                ]
-            )
-
-            # Published so alerts can compare a collection against its own
-            # budget instead of against a hard-coded number of seconds, which
-            # would need retuning for every bucket and interval.
-            interval_metric_name = collector_metric_name + ["collect_interval_seconds"]
-            interval_metric_description = "Configured interval between collections."
-
-            metrics.append(
-                [
-                    interval_metric_name,
-                    prometheus_labels,
-                    float(self.interval_seconds),
-                    interval_metric_description,
-                ]
-            )
-
-            if self.probe is not None:
-                probe_result = self.probe.result
-
-                metrics.append(
-                    [
-                        collector_metric_name + ["bucket_reachable"],
-                        prometheus_labels,
-                        int(probe_result.reachable),
-                        "Whether the last connectivity probe reached the bucket.",
-                    ]
-                )
-                metrics.append(
-                    [
-                        collector_metric_name + ["bucket_probe_duration_seconds"],
-                        prometheus_labels,
-                        probe_result.duration_seconds,
-                        "Duration of the last connectivity probe, in seconds.",
-                    ]
-                )
-                # Grows without bound if the probe thread dies, which would
-                # otherwise leave `bucket_reachable` frozen and trusted.
-                metrics.append(
-                    [
-                        collector_metric_name + ["bucket_probe_age_seconds"],
-                        prometheus_labels,
-                        probe_result.age_seconds(),
-                        "Age of the last connectivity probe, in seconds.",
-                    ]
-                )
-                # Monotonic, so increase() over it reads as a rate even though
-                # the collector can only emit gauges. This is what makes a
-                # reconnection visible instead of it hiding inside
-                # bucket_probe_duration_seconds as latency.
-                metrics.append(
-                    [
-                        collector_metric_name + ["bucket_probe_retries_total"],
-                        prometheus_labels,
-                        float(self.probe.retries_total),
-                        "Connectivity probe attempts retried since start.",
-                    ]
-                )
-                # Every reason from the start, at zero: increase() over a series
-                # that appears with its first error misses that error.
-                for reason, count in self.probe.errors_total.items():
-                    metrics.append(
-                        [
-                            collector_metric_name + ["bucket_probe_errors_total"],
-                            merge_dicts_ordered(prometheus_labels, reason=reason),
-                            float(count),
-                            "Connectivity probe attempts that failed, by reason.",
-                        ]
-                    )
-                connections = self.probe.connections_total
-                if connections is not None:
-                    metrics.append(
-                        [
-                            collector_metric_name + ["bucket_probe_connections_total"],
-                            prometheus_labels,
-                            float(connections),
-                            "TCP connections the connectivity probe established "
-                            "since start.",
-                        ]
-                    )
-                dns = self.probe.dns
-                metrics.append(
-                    [
-                        collector_metric_name + ["bucket_dns_duration_seconds"],
-                        prometheus_labels,
-                        dns.duration_seconds,
-                        "Duration of the last resolution of the endpoint name, "
-                        "in seconds.",
-                    ]
-                )
-                metrics.append(
-                    [
-                        collector_metric_name + ["bucket_dns_failures_total"],
-                        prometheus_labels,
-                        float(self.probe.dns_failures_total),
-                        "Resolutions of the endpoint name that failed since start.",
-                    ]
-                )
-
-        except Exception as e:
-            logging.error(e)
-            yield collector_up_gauge(
-                up_metric_name, up_metric_description, succeeded=False
-            )
-        else:
-            yield from gauge_generator(metrics)
-            yield collector_up_gauge(
-                up_metric_name, up_metric_description, succeeded=True
-            )
-
-
-def collect_once(
-    source: UsageSource,
-    collector: BucketSizeCollector,
-    bucket_name,
-    interval_seconds=0,
-):
-    """Run one collection and publish it. Returns True on success."""
-    started = time.perf_counter()
-    try:
-        usage = source.fetch()
-    except Exception as e:
-        duration = time.perf_counter() - started
-        logging.error("Collect S3 Bucket %s failed: %s", bucket_name, describe(e))
-        # Keep the previous figures rather than dropping them to zero: a failed
-        # cycle should show up as status 0 and a growing staleness, not as a
-        # bucket that suddenly looks empty.
-        previous = collector.snapshot
-        collector.update(
-            Snapshot(
-                usage=previous.usage,
-                measured_at=previous.measured_at,
-                healthy=False,
-                duration_seconds=duration,
-                source_name=source.name,
-            )
-        )
-        return False
-
-    duration = time.perf_counter() - started
-    collector.update(
-        Snapshot(
-            usage=usage,
-            measured_at=datetime.now(timezone.utc),
-            healthy=True,
-            duration_seconds=duration,
-            source_name=source.name,
-        )
-    )
-    logging.info(
-        "Collect S3 Bucket %s via %s in %.3fs - {'bytes':%s,'count':%s}",
-        bucket_name,
-        source.name,
-        duration,
-        int(usage.size_bytes),
-        int(usage.object_count),
-    )
-
-    if interval_seconds and duration > SLOW_COLLECTION_RATIO * interval_seconds:
-        logging.warning(
-            "Collection took %.1fs, %.0f%% of the %.0fs interval. Raise "
-            "'interval' in collector.yml, or move to a constant-cost source.",
-            duration,
-            duration / interval_seconds * 100,
-            interval_seconds,
-        )
-
-    return True
 
 
 def positive_number(settings, key, unit):
@@ -784,173 +305,86 @@ def main():
     logging.captureWarnings(True)
 
     settings = load_configuration()
-
-    if args.check_config or multi_bucket(settings):
-        try:
-            specs = bucket_specs(settings)
-        except ConfigError as e:
-            logging.error("Invalid configuration: %s", e)
-            sys.exit(1)
-        if args.check_config:
-            sys.exit(check_config(specs))
-        # Until the multi-bucket monitor lands, a list is validated and refused
-        # rather than half-served.
-        logging.error(
-            "Multi-bucket monitoring is not available in this build yet; "
-            "%s bucket(s) configured. Validate them with --check-config.",
-            len(specs),
-        )
-        sys.exit(1)
-
-    openshift_namespace = require_env("OPENSHIFT_NAMESPACE")
-    require_env("AWS_ACCESS_KEY_ID")
-    require_env("AWS_SECRET_ACCESS_KEY")
-    aws_default_region = require_env("AWS_DEFAULT_REGION")
-    require_env("S3_BUCKET_NAME")
-    # Optional: empty means the real AWS endpoints, which is what the
-    # CloudWatch source expects.
-    aws_endpoint_url = os.getenv("AWS_ENDPOINT_URL", "")
-
-    # Through the same provider as a configured bucket; it cannot fail here,
-    # require_env has just checked the very variables it reads.
-    credentials = single_bucket_spec(os.environ).credentials.resolve()
-    aws_access_key_id = credentials.access_key
-    aws_secret_access_key = credentials.secret_key
-    s3_bucket_name = credentials.bucket
-    interval = positive_number(settings, "interval", "minutes")
-    max_failures = int(settings["max_failures"])
-    connectivity_interval = int(settings["connectivity_interval"])
-    # A retry must never outlast the interval it is meant to shorten.
-    retry_interval = min(
-        positive_number(settings, "retry_interval", "seconds"), interval * 60
-    )
-    probe_timeout = probe_timeout_for(settings["probe_timeout"], connectivity_interval)
-    redetect_interval = int(settings["redetect_interval"])
+    multi = multi_bucket(settings)
 
     try:
-        s3_client = build_s3_client(
-            aws_access_key_id,
-            aws_secret_access_key,
-            aws_default_region,
-            aws_endpoint_url,
-        )
-    except Exception as e:
-        logging.error("Cannot build the S3 client: %s", e)
+        specs = bucket_specs(settings)
+    except ConfigError as e:
+        logging.error("Invalid configuration: %s", e)
         sys.exit(1)
+    if args.check_config:
+        sys.exit(check_config(specs))
 
-    context = SourceContext(
-        endpoint_url=aws_endpoint_url,
-        region=aws_default_region,
-        bucket=s3_bucket_name,
-        access_key=aws_access_key_id,
-        secret_key=aws_secret_access_key,
-        client=s3_client,
-        config=settings["sources"],
-    )
+    if not multi:
+        # The single-bucket mode's own checks, with the messages it always had.
+        require_env("OPENSHIFT_NAMESPACE")
+        require_env("AWS_ACCESS_KEY_ID")
+        require_env("AWS_SECRET_ACCESS_KEY")
+        require_env("AWS_DEFAULT_REGION")
+        require_env("S3_BUCKET_NAME")
 
-    # Its own client, so the probe's timeout budget never becomes the
-    # collection's.
-    probe_client = probe_client_for(
-        s3_client,
-        connectivity_interval,
-        probe_timeout,
-        aws_access_key_id,
-        aws_secret_access_key,
-        aws_default_region,
-        aws_endpoint_url,
-    )
-    probe = ConnectivityProbe(probe_client, s3_bucket_name, connectivity_interval)
-
-    info = Info("webtech_s3_exporter", "Webtech Prometheus Exporter version")
-
-    def publish_info(active_source):
-        info.info(
-            {
-                "version": __version__,
-                "namespace": openshift_namespace,
-                "name": s3_bucket_name,
-                "source": active_source.name,
-            }
-        )
-
-    detections = []
-
-    def detect():
-        """Detect the usage source; from the second time on, with fresh clients."""
-        detect_context = context
-        if detections:
-            # Raises when the client cannot be rebuilt; the selector then keeps
-            # the current source.
-            detect_context = SourceContext(
-                endpoint_url=aws_endpoint_url,
-                region=aws_default_region,
-                bucket=s3_bucket_name,
-                access_key=aws_access_key_id,
-                secret_key=aws_secret_access_key,
-                client=build_s3_client(
-                    aws_access_key_id,
-                    aws_secret_access_key,
-                    aws_default_region,
-                    aws_endpoint_url,
-                ),
-                config=settings["sources"],
-            )
-        detections.append(True)
-
-        detected = sources.resolve(detect_context, settings["source"])
-        publish_info(detected)
-
-        if len(detections) > 1 and connectivity_interval:
-            # Its own try: the source has just been resolved, and a probe
-            # client that fails to build must not undo that.
-            try:
-                probe.set_client(
-                    build_probe_client(
-                        aws_access_key_id,
-                        aws_secret_access_key,
-                        aws_default_region,
-                        aws_endpoint_url,
-                        probe_timeout,
-                    )
-                )
-            except Exception as e:
-                logging.error(
-                    "Cannot rebuild the probe client, keeping the current one: %s",
-                    e,
-                )
-        return detected
-
-    selector = SourceSelector(
-        detect,
-        requested=settings["source"],
-        probe=probe if connectivity_interval else None,
-        max_failures=max_failures,
-        redetect_seconds=redetect_interval,
-    )
-
-    collector = BucketSizeCollector(
-        namespace=openshift_namespace,
-        bucket=s3_bucket_name,
+    interval = positive_number(settings, "interval", "minutes")
+    connectivity_interval = int(settings["connectivity_interval"])
+    monitor_settings = MonitorSettings(
         interval_seconds=interval * 60,
-        probe=probe if connectivity_interval else None,
+        retry_seconds=positive_number(settings, "retry_interval", "seconds"),
+        connectivity_interval=connectivity_interval,
+        probe_timeout=probe_timeout_for(
+            settings["probe_timeout"], connectivity_interval
+        ),
+        max_failures=int(settings["max_failures"]),
+        redetect_seconds=int(settings["redetect_interval"]),
+        source=settings["source"],
+        sources_config=settings["sources"],
+        spread=len(specs) > 1,
     )
-    REGISTRY.register(collector)
+    max_workers = int(
+        positive_number(settings, "max_concurrent_collections", "collections")
+    )
+    refresh_seconds = positive_number(settings, "credentials_refresh", "seconds")
 
-    probe.start(STOP)
+    monitors = [BucketMonitor(spec, monitor_settings) for spec in specs]
+    refresher = CredentialsRefresher(monitors, refresh_seconds, STOP)
+    for monitor in monitors:
+        monitor.on_refresh_request = refresher.request
+
+    # A first pass before anything else runs, so every bucket whose Secret is
+    # readable starts at once.
+    refresher.refresh_all()
+    if not multi and not monitors[0].configured:
+        # One bucket and nothing to watch: as before 6.0.0, that stops the start.
+        logging.error("Cannot watch the bucket: %s", monitors[0].error)
+        sys.exit(1)
+    logging.info(
+        "Watching %s of %s bucket(s)",
+        sum(monitor.configured for monitor in monitors),
+        len(monitors),
+    )
+
+    scheduler = CollectionScheduler(monitors, max_workers, STOP)
+    refresher.on_change = scheduler.wake
+    REGISTRY.register(ExporterCollector(monitors, scheduler, __version__))
 
     set_proxy_headers(settings["proxy_headers"])
     exporter(port=9773)
-    health(port=9774, probe=probe if connectivity_interval else None)
+    health(
+        port=9774,
+        readiness=(
+            (lambda: {monitor.spec.key: monitor.readiness() for monitor in monitors})
+            if connectivity_interval
+            else None
+        ),
+    )
 
-    while not STOP.is_set():
-        succeeded = collect_once(
-            selector.source, collector, s3_bucket_name, interval * 60
-        )
-        selector.record(succeeded)
+    refresher.start()
+    scheduler.start()
 
-        # Retry sooner than the full interval after a failure: at 60 minutes,
-        # one transient error would otherwise mean an hour of stale figures.
-        # The wait is interruptible, so SIGTERM is not held for an interval.
-        STOP.wait(interval * 60 if succeeded else retry_interval)
+    # Woken by SIGTERM/SIGINT; the timeout keeps the main thread responsive to
+    # signals on every platform.
+    while not STOP.wait(1):
+        pass
 
+    scheduler.shutdown()
+    for monitor in monitors:
+        monitor.stop()
     shutdown()

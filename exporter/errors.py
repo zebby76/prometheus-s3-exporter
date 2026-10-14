@@ -101,3 +101,25 @@ def classify(exc: BaseException) -> str:
         if status is not None and status >= 400:
             return "http_4xx"
     return "other"
+
+
+# What S3 answers to a key it does not know or a signature it cannot match:
+# the credential is wrong, not the storage. Worth reading the Secret again at
+# once rather than at the next periodic refresh.
+_CREDENTIAL_CODES = frozenset(
+    {"InvalidAccessKeyId", "SignatureDoesNotMatch", "InvalidToken", "ExpiredToken"}
+)
+
+
+def is_credentials_error(exc: BaseException) -> bool:
+    """True when S3 rejected the credential itself.
+
+    A bare 403 is not enough: a policy that denies one call answers 403 just
+    the same, and the probe already falls back on it.
+    """
+    for link in chain(exc):
+        if isinstance(link, ClientError):
+            code = str(link.response.get("Error", {}).get("Code", ""))
+            if code in _CREDENTIAL_CODES:
+                return True
+    return False

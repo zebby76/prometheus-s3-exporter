@@ -4,7 +4,7 @@ import io
 
 import pytest
 
-from exporter import bucket_specs, check_config
+from exporter import bucket_specs, check_config, load_configuration
 from exporter.buckets import ConfigError, multi_bucket, parse_buckets
 from exporter.credentials import (
     CredentialsUnavailable,
@@ -243,3 +243,72 @@ def test_unresolvable_credentials_are_not_a_config_error():
 
     with pytest.raises(CredentialsUnavailable):
         specs[0].credentials.resolve()
+
+
+# --- per-bucket schedule and the mode's defaults ----------------------------------
+
+
+def test_per_bucket_interval_source_and_collect():
+    (spec,) = parse(
+        [{"secret": "s", "interval": 120, "source": "LIST", "collect": False}]
+    )
+
+    assert spec.interval_minutes == 120
+    assert spec.source == "list"
+    assert spec.collect is False
+
+
+def test_a_bucket_is_collected_by_default():
+    (spec,) = parse([{"secret": "s"}])
+
+    assert spec.collect is True
+    assert spec.interval_minutes is None
+    assert spec.source is None
+
+
+@pytest.mark.parametrize(
+    "entry, message",
+    [
+        ({"secret": "s", "interval": 0}, "interval must be"),
+        ({"secret": "s", "interval": "60"}, "interval must be"),
+        ({"secret": "s", "interval": True}, "interval must be"),
+        ({"secret": "s", "collect": "no"}, "collect must be true or false"),
+        ({"secret": "s", "source": "s3"}, "source must be one of"),
+    ],
+)
+def test_a_bad_per_bucket_setting_stops_the_start(entry, message):
+    with pytest.raises(ConfigError, match=message):
+        parse([entry])
+
+
+def write_config(tmp_path, *lines):
+    path = tmp_path / "collector.yml"
+    path.write_text(
+        "kind: PrometheusExporterConfig\nconfiguration:\n" + "\n".join(lines) + "\n"
+    )
+    return str(path)
+
+
+def test_a_bucket_list_collects_hourly_by_default(tmp_path):
+    settings = load_configuration(
+        write_config(tmp_path, "  - buckets:", "      - { secret: s }")
+    )
+
+    assert settings["interval"] == 60
+    assert settings["max_concurrent_collections"] == 2
+    assert settings["credentials_refresh"] == 300
+
+
+def test_a_single_bucket_keeps_five_minutes(tmp_path):
+    assert (
+        load_configuration(write_config(tmp_path, "  - source: auto"))["interval"] == 5
+    )
+
+
+def test_an_interval_written_down_wins_in_both_modes(tmp_path):
+    settings = load_configuration(
+        write_config(
+            tmp_path, "  - interval: 15", "  - buckets:", "      - { secret: s }"
+        )
+    )
+    assert settings["interval"] == 15

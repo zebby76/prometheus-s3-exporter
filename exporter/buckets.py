@@ -24,6 +24,7 @@ from exporter.credentials import (
     KubernetesSecretCredentials,
 )
 from exporter.kube import InClusterKubernetes, valid_namespace, valid_secret_name
+from exporter.sources import AUTO, SOURCES
 
 ENTRY_KEYS = (
     "secret",
@@ -33,6 +34,9 @@ ENTRY_KEYS = (
     "secret_keys",
     "endpoint_url",
     "region",
+    "interval",
+    "collect",
+    "source",
 )
 
 
@@ -51,6 +55,11 @@ class BucketSpec:
     label_namespace: str
     endpoint_url: str
     region: str
+    # Per-bucket overrides; None means the global setting.
+    interval_minutes: Optional[float] = None
+    source: Optional[str] = None
+    # False: probe the bucket, never list it -- for one too large to list.
+    collect: bool = True
 
 
 def multi_bucket(settings: Mapping) -> bool:
@@ -88,6 +97,35 @@ def _optional_text(entry: Mapping, key: str, where: str) -> Optional[str]:
     if not isinstance(value, str) or not value:
         raise ConfigError(f"{where}: {key} must be a non-empty string")
     return value
+
+
+def _interval(entry: Mapping, where: str) -> Optional[float]:
+    value = entry.get("interval")
+    if value is None:
+        return None
+    # bool is an int: `interval: true` must not read as one minute.
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+        raise ConfigError(f"{where}: interval must be a number of minutes above 0")
+    return float(value)
+
+
+def _collect(entry: Mapping, where: str) -> bool:
+    value = entry.get("collect", True)
+    if not isinstance(value, bool):
+        raise ConfigError(f"{where}: collect must be true or false")
+    return value
+
+
+def _source(entry: Mapping, where: str) -> Optional[str]:
+    value = entry.get("source")
+    if value is None:
+        return None
+    known = [AUTO] + [candidate.name for candidate in SOURCES]
+    if not isinstance(value, str) or value.strip().lower() not in known:
+        raise ConfigError(
+            f"{where}: source must be one of {', '.join(known)}, got {value!r}"
+        )
+    return value.strip().lower()
 
 
 def parse_buckets(
@@ -180,6 +218,9 @@ def parse_buckets(
                 label_namespace=namespace,
                 endpoint_url=endpoint_url,
                 region=region,
+                interval_minutes=_interval(entry, where),
+                source=_source(entry, where),
+                collect=_collect(entry, where),
             )
         )
     return specs

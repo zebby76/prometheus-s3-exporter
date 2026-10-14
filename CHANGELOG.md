@@ -24,17 +24,44 @@ Work toward 6.0.0: one exporter for a list of buckets.
 
 ### Upgrading from 5.x
 
-Draft, completed as 6.0.0 takes shape. Nothing in this section breaks yet.
+Draft, completed as 6.0.0 takes shape.
+
+- **`namespace` is now `bucket_namespace`** on every bucket metric, single-bucket
+  deployments included. Prometheus sets `namespace` on every target itself, so the exporter's
+  value used to land in `exported_namespace`: adapt alerts and queries that use either.
+- **`/readyz` answers with every bucket**: `{"status": …, "buckets": {<key>: {"name", "state",
+  …}}}` instead of `{"status": …, "bucket": …}`. The status code is unchanged for a single
+  bucket.
+- **The collection interval stretches for slow buckets**, single-bucket ones included: the next
+  collection is due no sooner than four times the last one's duration, and the warning about a
+  collection taking a large share of the interval is gone.
+  `webtech_s3_collect_interval_seconds` reports the interval in force.
+- `webtech_s3_exporter_info` has one series per watched bucket, labelled `bucket_namespace` and
+  `name`.
 
 ### Added
 
 - `buckets:` and `secret_keys:` in `collector.yml`: a list of buckets, each with its credentials
   and name read from a Kubernetes Secret through the API (the pod's ServiceAccount, the cluster
   CA, a token re-read on every call), or from environment variables laid out by `envFrom` with a
-  `prefix`. Validated at startup: what only a human can fix stops the exporter. The list is not
-  monitored yet; started with it, the exporter stops with a message.
+  `prefix`. Validated at startup: what only a human can fix stops the exporter.
 - `--check-config`: resolves every bucket's credentials once and reports, without ever printing
   a value; exits 1 if any bucket fails.
+- The bucket list is watched. Every bucket has its own probe; collections run in the
+  background, at most `max_concurrent_collections` (2) at once, the most overdue first, with an
+  interval of 60 minutes by default and stretched for slow buckets. Per bucket: `interval`,
+  `source`, and `collect: false` to probe a bucket without ever listing it.
+- Secrets are read again every `credentials_refresh` seconds (300) and at once when S3 rejects a
+  key: a rotated key rebuilds the clients, a repointed Secret starts the new bucket from scratch,
+  a Secret that becomes readable starts its bucket -- no restart.
+- A bucket whose credentials cannot be read does not stop the exporter:
+  `webtech_s3_bucket_configured 0`, the reason in the log and in `/readyz`.
+- `webtech_s3_bucket_configured`, `webtech_s3_buckets{state}`, `webtech_s3_collections_running`,
+  `webtech_s3_collections_overdue`.
+
+### Changed
+
+- `/readyz` answers 503 only when every bucket is unreachable or unconfigured.
 
 ## [5.1.0]
 

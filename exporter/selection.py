@@ -89,6 +89,15 @@ class SourceSelector:
             )
         return self.source
 
+    def redetect(self, reason: str) -> Optional[UsageSource]:
+        """Detect again now, for a reason the caller knows about.
+
+        A rotated credential, typically: the source detected with the old key
+        may not be the one the new key can use.
+        """
+        self._failures = 0
+        return self._redetect(reason)
+
     def record(self, succeeded: bool) -> Optional[UsageSource]:
         """Account for one collection; returns the source if it detected again."""
         if succeeded:

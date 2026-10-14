@@ -106,6 +106,24 @@ for reason in dns connect_timeout connect read_timeout http_5xx http_4xx other; 
 done
 echo "ok: every probe error reason is published"
 
+# Bucket metrics carry bucket_namespace, never namespace: Prometheus sets that
+# one on every target and would rename the exporter's to exported_namespace.
+if ! grep -q '^webtech_s3_bucket_size_bytes{bucket_namespace="default-namespace",name="my-bucket"}' <<<"${scrape}"; then
+	echo "FAIL: webtech_s3_bucket_size_bytes is not labelled {bucket_namespace, name}" >&2
+	exit 1
+fi
+if grep -q '^webtech_s3_[a-z_]*{namespace=' <<<"${scrape}"; then
+	echo "FAIL: a metric still carries a namespace label" >&2
+	exit 1
+fi
+echo "ok: bucket metrics are labelled bucket_namespace"
+assert_equals webtech_s3_bucket_configured "$(value_of webtech_s3_bucket_configured)" 1
+if ! grep -q '^webtech_s3_buckets{state="configured"} 1' <<<"${scrape}"; then
+	echo "FAIL: webtech_s3_buckets{state=\"configured\"} is not 1" >&2
+	exit 1
+fi
+echo "ok: one bucket configured"
+
 # The detected source is published as a label so a fallback stays visible.
 if ! grep -q 'webtech_s3_exporter_info{.*source="' <<<"${scrape}"; then
 	echo "FAIL: webtech_s3_exporter_info carries no source label" >&2

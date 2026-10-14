@@ -95,10 +95,16 @@ class DnsResult:
 class ConnectivityProbe:
     """Answers "can we still reach the bucket" with one cheap request."""
 
-    def __init__(self, client, bucket, interval_seconds=60):
+    def __init__(self, client, bucket, interval_seconds=60, on_error=None, name=None):
         self._client = client
         self._bucket = bucket
+        # What the thread is named after: the bucket, or more when the same
+        # bucket is watched twice.
+        self._name = name or bucket
         self.interval_seconds = interval_seconds
+        # Called with each failed attempt's exception, so the owner can tell a
+        # rejected credential from an outage. Must not raise.
+        self._on_error = on_error
         self._result = ProbeResult()
         # None until the first check decides which call this credential is
         # allowed to make; then it stays put. The label names it in the logs.
@@ -245,6 +251,11 @@ class ConnectivityProbe:
             except Exception as exc:
                 failures.append((time.perf_counter() - attempt_started, exc))
                 self._errors_total[classify(exc)] += 1
+                if self._on_error is not None:
+                    try:
+                        self._on_error(exc)
+                    except Exception:
+                        logging.exception("Probe error callback failed")
                 if attempts < _MAX_ATTEMPTS:
                     # Counted, not hidden: a probe that had to reconnect is a
                     # fact about the path, and the whole point of doing this
@@ -411,15 +422,23 @@ class ConnectivityProbe:
 
         return result
 
-    def run_until(self, stop: threading.Event):
-        """Probe on the configured period until `stop` is set."""
+    def run_until(self, stop: threading.Event, initial_delay: float = 0):
+        """Probe on the configured period until `stop` is set.
+
+        `initial_delay` spreads the first checks of many buckets over the
+        first interval, instead of a hundred requests in the same second.
+        """
+        if initial_delay and stop.wait(initial_delay):
+            return
         while not stop.is_set():
             self.check_once()
             # After the check, so a slow resolver never delays its verdict.
             self.resolve_once()
             stop.wait(self.interval_seconds)
 
-    def start(self, stop: threading.Event) -> Optional[threading.Thread]:
+    def start(
+        self, stop: threading.Event, initial_delay: float = 0
+    ) -> Optional[threading.Thread]:
         """Start the probe thread, or return None when disabled."""
         if not self.interval_seconds:
             logging.info("Connectivity probe disabled")
@@ -427,10 +446,16 @@ class ConnectivityProbe:
 
         thread = threading.Thread(
             target=self.run_until,
-            args=(stop,),
-            name="connectivity-probe",
+            args=(stop, initial_delay),
+            # Named after the bucket: with a hundred probes in one process,
+            # the thread name is what a log line is read by.
+            name=f"probe-{self._name}",
             daemon=True,
         )
         thread.start()
-        logging.info("Connectivity probe started, every %ss", self.interval_seconds)
+        logging.info(
+            "Connectivity probe of %s started, every %ss",
+            self._bucket,
+            self.interval_seconds,
+        )
         return thread

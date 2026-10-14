@@ -183,36 +183,49 @@ class HealthMetricsHandler:
         resp.text = '{"status": true}'
 
 
-class ReadinessHandler:
-    """Readiness: can the bucket be reached, per the connectivity probe."""
+def probe_state(name, result) -> dict:
+    """A bucket's /readyz entry from its last probe result."""
+    if result.checked_at is None:
+        # Not probed yet: nothing to report against.
+        return {"name": name, "state": "unknown"}
+    if result.reachable:
+        return {"name": name, "state": "reachable"}
+    return {
+        "name": name,
+        "state": "unreachable",
+        "reason": result.reason,
+        "error": result.error,
+        "age_seconds": round(result.age_seconds(), 1),
+    }
 
-    def __init__(self, probe):
-        self._probe = probe
+
+# States that count against readiness. `unknown` does not: holding the pod out
+# of service on no evidence would be worse than serving what it has.
+_FAILING = frozenset({"unreachable", "unconfigured"})
+
+
+class ReadinessHandler:
+    """Readiness: can the buckets be reached, per their connectivity probes.
+
+    503 only when every bucket fails. The pod serves the metrics of all its
+    buckets, so one unreachable bucket out of a hundred must not take the
+    other ninety-nine out of service with it. With a single bucket this is
+    the behaviour it always had.
+    """
+
+    def __init__(self, states):
+        # A callable returning {bucket key: state entry}.
+        self._states = states
 
     def on_get(self, _req, resp):
         resp.set_header("Content-Type", "application/json")
-        result = self._probe.result
-
-        if result.checked_at is None:
-            # Not probed yet: nothing to report against, so do not hold the
-            # pod out of service on the strength of no evidence.
-            resp.text = '{"status": true, "bucket": "unknown"}'
-            return
-
-        if result.reachable:
-            resp.text = '{"status": true, "bucket": "reachable"}'
-            return
-
-        resp.status = falcon.HTTP_503
-        resp.text = json.dumps(
-            {
-                "status": False,
-                "bucket": "unreachable",
-                "reason": result.reason,
-                "error": result.error,
-                "age_seconds": round(result.age_seconds(), 1),
-            }
+        buckets = self._states()
+        failing = bool(buckets) and all(
+            entry["state"] in _FAILING for entry in buckets.values()
         )
+        if failing:
+            resp.status = falcon.HTTP_503
+        resp.text = json.dumps({"status": not failing, "buckets": buckets})
 
 
 class CustomMetricsHandler:
@@ -280,14 +293,17 @@ def exporter(port=9773, addr="0.0.0.0"):
     return httpd
 
 
-def health(port=9774, addr="0.0.0.0", probe=None):
-    """Serve /healthz (and /readyz with a probe); returns the server."""
+def health(port=9774, addr="0.0.0.0", readiness=None):
+    """Serve /healthz (and /readyz with probes); returns the server.
+
+    `readiness` is a callable returning {bucket key: state entry}.
+    """
     api = falcon.App()
     api.add_route("/healthz", HealthMetricsHandler())
-    # Only routed when a probe exists: without one there is nothing to base a
+    # Only routed when the probes run: without them there is nothing to base a
     # readiness answer on.
-    if probe is not None:
-        api.add_route("/readyz", ReadinessHandler(probe))
+    if readiness is not None:
+        api.add_route("/readyz", ReadinessHandler(readiness))
 
     httpd = _serve(api, addr, port, "health-listener")
     logging.debug(

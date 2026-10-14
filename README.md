@@ -80,10 +80,9 @@ mounted ConfigMap.
 
 ## Multi-bucket configuration
 
-> **In progress for 6.0.0.** This build reads and validates the bucket list and
-> checks every bucket's credentials (`--check-config`), but does not monitor the
-> list yet: started with `buckets:` and without `--check-config`, it stops with a
-> message. Without `buckets:` nothing changes.
+> **In progress for 6.0.0.** The list is watched: credentials, probes and
+> collections for every bucket. Still to come: network checks per endpoint and
+> reloading the list without a restart.
 
 Without `buckets:` the exporter watches one bucket, named by the environment:
 `S3_BUCKET_NAME`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`,
@@ -110,12 +109,43 @@ configuration:
         secret_keys: { access_key: KEY_ID }   # merged over the global names
         endpoint_url: https://grid-2.example:8082   # default: AWS_ENDPOINT_URL
         region: eu-west-1         # default: AWS_DEFAULT_REGION
+        interval: 240             # minutes; default: the global interval
+        source: list              # default: the global source
+      - secret: huge-s3
+        namespace: app-d
+        collect: false            # probed, never listed
       - env_prefix: APP_C_        # variables set by envFrom with prefix APP_C_
         namespace: app-c          # label only; default: OPENSHIFT_NAMESPACE
 ```
 
 `AWS_DEFAULT_REGION` and `AWS_ENDPOINT_URL` stay global settings, overridable per
 bucket.
+
+### Probes first, sizes in the background
+
+With a list, what matters most is that every bucket is there and answering; its
+size can be an hour old. So:
+
+- **Every bucket has its own probe**, on its own thread, every
+  `connectivity_interval` seconds (30). Probes never wait for a collection. Their
+  first checks are spread over the first interval, instead of a hundred requests
+  in the same second.
+- **Collections are background work.** `interval` defaults to **60 minutes**
+  with a list (5 without one), and at most `max_concurrent_collections` (2) run
+  at once, the most overdue first. First collections are spread over the first
+  five minutes; later ones keep their own rhythm.
+- **The interval stretches by itself.** The next collection of a bucket is due
+  no sooner than four times the last one's duration: a listing that takes
+  30 minutes runs every two hours, while the small buckets keep their interval.
+  `webtech_s3_collect_interval_seconds` shows the interval in force.
+- **`collect: false`** watches a bucket with its probe only, for one too large to
+  list at all. It publishes no size rather than a zero.
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `interval` | 60 (list), 5 (single) | minutes between collections, before stretching |
+| `max_concurrent_collections` | 2 | collections running at once |
+| `credentials_refresh` | 300 | seconds between two reads of every bucket's credentials |
 
 ### Credentials
 
@@ -160,6 +190,13 @@ envFrom:
 
 Environment variables do not follow a rotation: the pod has to restart.
 
+Secrets are read again every `credentials_refresh` seconds (300), and at once --
+at most once a minute per bucket -- when S3 rejects a key
+(`InvalidAccessKeyId`, `SignatureDoesNotMatch`). A rotated key rebuilds the
+bucket's clients and keeps its figures; a Secret repointed at another bucket
+starts that bucket from scratch. A Secret that cannot be read for a moment keeps
+the credentials already in hand.
+
 Whatever the mode, no credential is ever logged, printed or put in an error
 message: they name the Secret, the key or the variable, never what it holds.
 
@@ -172,7 +209,17 @@ entries must not go unnoticed), an invalid Secret or namespace name, the same
 bucket listed twice, `secret` mode outside a cluster, no region.
 
 What can fix itself does not stop the start: a Secret that does not exist yet, a
-RoleBinding still to be applied, a missing key in a Secret.
+RoleBinding still to be applied, a missing key in a Secret. That bucket shows as
+`webtech_s3_bucket_configured 0`, with the reason in the log and in `/readyz`,
+the others are watched as usual, and the next read of its Secret picks it up
+once fixed -- no restart. Alert on it:
+
+```promql
+webtech_s3_bucket_configured == 0
+```
+
+Without `buckets:`, a bucket that cannot be watched still stops the start, as it
+always has.
 
 `--check-config` resolves every bucket's credentials once, reports, and exits
 with 0 when all of them resolve, 1 otherwise. Run it to find the missing Secret,
@@ -188,13 +235,19 @@ FAIL  secret app-d/partial: S3_SECRET is missing or empty
 
 ## Metrics
 
+Every bucket's metrics are labelled `{bucket_namespace, name}`: the namespace of
+the application that owns the bucket (with a Secret, the Secret's namespace;
+otherwise `OPENSHIFT_NAMESPACE`) and the bucket name. `bucket_namespace` and not
+`namespace`, which Prometheus sets itself on every target: the exporter's value
+used to land in `exported_namespace`.
+
 | Metric | Meaning |
 | --- | --- |
 | `webtech_s3_bucket_size_bytes` | bucket size in bytes |
 | `webtech_s3_bucket_count_total` | number of objects |
 | `webtech_s3_usage_stale_seconds` | age of the figures being served |
 | `webtech_s3_collect_duration_seconds` | duration of the last collection |
-| `webtech_s3_collect_interval_seconds` | configured interval, so alerts can use a ratio |
+| `webtech_s3_collect_interval_seconds` | interval in force, stretched for slow buckets |
 | `webtech_s3_bucket_reachable` | 1 when the last connectivity probe reached the bucket |
 | `webtech_s3_bucket_probe_duration_seconds` | latency of the last probe |
 | `webtech_s3_bucket_probe_age_seconds` | age of the last probe |
@@ -204,7 +257,15 @@ FAIL  secret app-d/partial: S3_SECRET is missing or empty
 | `webtech_s3_bucket_dns_duration_seconds` | duration of the last resolution of the endpoint name |
 | `webtech_s3_bucket_dns_failures_total` | resolutions of the endpoint name that failed |
 | `webtech_s3_exporter_status` | 1 when the last collection succeeded |
+| `webtech_s3_exporter_info{version, source}` | one series per watched bucket |
+| `webtech_s3_bucket_configured{bucket_key}` | 1 when the bucket's credentials could be read; `name` is empty until then |
+| `webtech_s3_buckets{state}` | buckets `configured` and `unconfigured` |
+| `webtech_s3_collections_running` | collections in progress |
+| `webtech_s3_collections_overdue` | collections late with no worker free: raise `max_concurrent_collections` or the CPU limit |
 | `webtech_s3_exporter_up` | 1 when the exporter is answering |
+
+A probe-only bucket (`collect: false`) has no size, count or collection
+metrics.
 
 `webtech_s3_usage_stale_seconds` is worth alerting on. Sources backed by a
 background scanner report figures that lag by minutes (StorageGRID, MinIO) or by
@@ -362,10 +423,22 @@ The two endpoints answer different questions:
   design, since restarting the pod does not fix an unreachable bucket and only
   throws away the metrics right when they are wanted. This drives the container
   `HEALTHCHECK`.
-- **`/readyz`** is readiness: `200` while the bucket is reachable, `503` once the
-  probe says it is not, `200` before the first probe has run. Wire an OpenShift
-  readiness probe to it if you want the pod pulled out of service during an
-  outage; it is safe to ignore otherwise.
+- **`/readyz`** is readiness, from the probes. It answers `503` only when
+  **every** bucket is unreachable or unconfigured, and `200` otherwise: the pod
+  serves the metrics of all its buckets, so one unreachable bucket out of a
+  hundred must not take the other ninety-nine out of service. A bucket not probed
+  yet does not count against it. With a single bucket, that is `200` while it is
+  reachable and `503` once it is not. The body details every bucket:
+
+  ```json
+  {"status": true, "buckets": {
+    "secret:app-a/app-a-s3": {"name": "uploads-a", "state": "reachable"},
+    "secret:app-b/app-b-s3": {"name": "archive", "state": "unreachable",
+                              "reason": "dns", "error": "#1 …", "age_seconds": 12.0},
+    "secret:app-c/app-c-s3": {"name": null, "state": "unconfigured",
+                              "error": "reading secret app-c/app-c-s3 is forbidden …"}}}
+  ```
+
 
 Set `connectivity_interval: 0` to switch the probe off entirely: no thread, no
 requests, no probe metrics, and `/readyz` is not routed.
@@ -486,12 +559,36 @@ than a 2 GB one holding 150 000. Budget roughly one request per 1000 objects and
 | 150 000 | 150 | ~16 s | 5 % |
 | 700 000 | 700 | ~60 s | 20 % |
 
-`interval` is in minutes, defaults to 5, and must be above 0: the exporter refuses
-to start otherwise (so does `retry_interval`). Past roughly a quarter of the
-interval the exporter logs a warning on every cycle. Raising `interval` is almost always the right answer: a bucket size is a
-capacity figure, and few dashboards need it fresher than every 5 to 15 minutes.
-Each deployment watches a single bucket, so the interval can be tuned per bucket
-rather than globally.
+`interval` is in minutes and must be above 0: the exporter refuses to start
+otherwise (so do `retry_interval`, `max_concurrent_collections` and
+`credentials_refresh`). A collection may use at most a quarter of its bucket's
+time: past that, the next one is pushed back to four times its duration, and
+`webtech_s3_collect_interval_seconds` shows it.
+
+### Watching many buckets
+
+Measured on the local stack, one exporter watching **103 buckets** (all through
+`list`, 0.5 CPU):
+
+| | |
+| --- | --- |
+| memory | 145 MB at start, 155 MB once every bucket was collected (about 0.65 MB per bucket over a 70 MB base: two S3 clients each) |
+| threads | 109: one probe per bucket, plus the scheduler, workers and listeners |
+| CPU between collections | under 1 % |
+| first collections | all 103 within 6 minutes of the start |
+| probe latency | p50 2.7 ms, max 3.8 ms |
+| `/metrics` | 215 KB, 2347 lines, served in 158 ms |
+
+What grows with the buckets is the listing. It is CPU-bound -- about 86 µs per
+object -- and every worker that lists holds up to one core. Size
+`max_concurrent_collections` and the CPU limit from the total number of objects
+listed per interval, and watch `webtech_s3_collections_overdue`: above zero,
+collections fall behind. A bucket too large to list at all is better probed
+with `collect: false`.
+
+The storage sees about one request per 1000 objects per collection: 50 million
+objects listed every hour is about 14 requests a second. Worth telling the team
+that runs it.
 
 ## Build
 

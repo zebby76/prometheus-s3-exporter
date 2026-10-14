@@ -83,10 +83,13 @@ configuration:
       #   # the API answers 404 rather than a wrong figure.
       #   jurisdiction: eu
 
-  # One exporter for a list of buckets (6.0.0, in progress: this build validates
-  # the list and checks it with --check-config, it does not monitor it yet).
-  # Without `buckets`, the exporter watches the one bucket S3_BUCKET_NAME names.
+  # One exporter for a list of buckets (6.0.0, in progress). Without `buckets`,
+  # the exporter watches the one bucket S3_BUCKET_NAME names. With it, `interval`
+  # defaults to 60 minutes: probes come first, sizes are background work.
   # See "Multi-bucket configuration" in README.md.
+  #
+  # - max_concurrent_collections: 2   # collections running at once
+  # - credentials_refresh: 300        # seconds between two reads of the Secrets
   #
   # - secret_keys:                # key names inside the Secrets (and variable
   #     access_key: S3_KEY        # suffixes with env_prefix); defaults are
@@ -95,5 +98,8 @@ configuration:
   # - buckets:
   #     - secret: app-a-s3        # read through the Kubernetes API; needs a Role
   #       namespace: app-a        # with `get` on this Secret, in its namespace
+  #     - secret: huge-s3
+  #       namespace: app-b
+  #       collect: false          # probed, never listed (also: interval, source)
   #     - env_prefix: APP_C_      # variables set by envFrom with prefix APP_C_
   #       namespace: app-c

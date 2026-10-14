@@ -1,5 +1,6 @@
 """Connectivity probe: method selection, outcomes, and the /readyz endpoint."""
 
+import json
 import logging
 import socket
 import threading
@@ -8,7 +9,7 @@ from datetime import datetime, timedelta, timezone
 import falcon
 import pytest
 
-from exporter.handler import ReadinessHandler
+from exporter.handler import ReadinessHandler, probe_state
 from exporter.probe import ConnectivityProbe, ProbeResult
 
 NOW = datetime(2026, 8, 28, 12, 0, tzinfo=timezone.utc)
@@ -524,9 +525,15 @@ def test_no_endpoint_means_nothing_to_resolve(monkeypatch):
 # --- /readyz ---------------------------------------------------------------
 
 
-class StubProbe:
-    def __init__(self, result):
-        self.result = result
+def ready(result):
+    """A single bucket's /readyz answer."""
+    return ready_with({"env:": probe_state("my-bucket", result)})
+
+
+def ready_with(buckets):
+    resp = FakeResponse()
+    ReadinessHandler(lambda: buckets).on_get(None, resp)
+    return resp
 
 
 class FakeResponse:
@@ -539,27 +546,21 @@ class FakeResponse:
         self.headers[name] = value
 
 
-def ready(result):
-    resp = FakeResponse()
-    ReadinessHandler(StubProbe(result)).on_get(None, resp)
-    return resp
-
-
 def test_ready_is_200_when_the_bucket_is_reachable():
     resp = ready(ProbeResult(reachable=True, checked_at=NOW))
     assert resp.status == falcon.HTTP_200
-    assert '"bucket": "reachable"' in resp.text
+    assert json.loads(resp.text)["buckets"]["env:"]["state"] == "reachable"
 
 
 def test_ready_is_503_when_the_bucket_is_unreachable():
     resp = ready(ProbeResult(reachable=False, checked_at=NOW, error="boom"))
     assert resp.status == falcon.HTTP_503
-    assert "boom" in resp.text
+    assert json.loads(resp.text)["buckets"]["env:"]["error"] == "boom"
 
 
 def test_ready_names_the_reason_of_the_failure():
     resp = ready(ProbeResult(reachable=False, checked_at=NOW, error="x", reason="dns"))
-    assert '"reason": "dns"' in resp.text
+    assert json.loads(resp.text)["buckets"]["env:"]["reason"] == "dns"
 
 
 def test_ready_is_200_before_the_first_probe():
@@ -567,7 +568,7 @@ def test_ready_is_200_before_the_first_probe():
     # letting it serve figures it already has.
     resp = ready(ProbeResult())
     assert resp.status == falcon.HTTP_200
-    assert '"bucket": "unknown"' in resp.text
+    assert json.loads(resp.text)["buckets"]["env:"]["state"] == "unknown"
 
 
 @pytest.mark.parametrize(
@@ -580,3 +581,30 @@ def test_ready_is_200_before_the_first_probe():
 )
 def test_ready_always_answers_json(result):
     assert ready(result).headers["Content-Type"] == "application/json"
+
+
+UP = {"name": "a", "state": "reachable"}
+DOWN = {"name": "b", "state": "unreachable", "reason": "dns", "error": "x"}
+UNCONFIGURED = {"name": None, "state": "unconfigured", "error": "forbidden"}
+UNKNOWN = {"name": "c", "state": "unknown"}
+
+
+def test_one_unreachable_bucket_does_not_take_the_others_out_of_service():
+    resp = ready_with({"a": UP, "b": DOWN, "x": UNCONFIGURED})
+
+    assert resp.status == falcon.HTTP_200
+    body = json.loads(resp.text)
+    assert body["status"] is True
+    assert body["buckets"]["b"]["state"] == "unreachable"
+
+
+def test_every_bucket_failing_is_a_503():
+    assert ready_with({"b": DOWN, "x": UNCONFIGURED}).status == falcon.HTTP_503
+
+
+def test_no_readable_bucket_at_all_is_a_503():
+    assert ready_with({"x": UNCONFIGURED}).status == falcon.HTTP_503
+
+
+def test_a_bucket_not_probed_yet_keeps_the_pod_ready():
+    assert ready_with({"b": DOWN, "c": UNKNOWN}).status == falcon.HTTP_200
